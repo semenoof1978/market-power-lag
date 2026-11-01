@@ -12,5 +12,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Probe
+        run: bash research/probe.sh || true
       - name: Run backtest
         run: python3 research/backtest.py
