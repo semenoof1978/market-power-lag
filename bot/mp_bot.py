@@ -392,7 +392,7 @@ def signal_card(c, now):
     d.text((W / 2, 275), f"выгода {pct(edge)}", font=mid, fill=fg, anchor="mm")
     d.line((80, 345, W - 80, 345), fill=soft, width=3)
     rows = [("Расчётная стоимость пая", rub(c["calc"])),
-            ("Котировка «Продают по»", rub(c["ask"])),
+            (("Котировка «Продают по»", rub(c["ask"])) if buy else ("Продать сейчас ≈", rub(c["bid"]))),
             (f"Фактическая (сайт УК, {ru_date(c['d0'])[:5]})", rub(c["nav0"]))]
     y = 395
     for label, val in rows:
