@@ -567,7 +567,7 @@ def incoming(state):
         if chat != state.get("chat_id"):
             continue
         text = (m.get("text") or "").lower().strip()
-        if re.search(r"статус|status|сейчас", text):
+        if re.search(r"статус|status|сейчас|обнов|/start", text):
             res["asked"] = True
         if re.search(r"^(сброс|цены авто|котировка авто|авто)\b", text):
             res.update(quote_off=True, buy=None, sell=None)
