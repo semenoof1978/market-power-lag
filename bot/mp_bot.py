@@ -243,18 +243,24 @@ def load_fund_quote(state):
     """Котировки маркет-мейкера по паю на Мосбирже: {"bid", "offer", "time", "board"} или None."""
     try:
         loc = state.get("fund_board")
+        if loc and loc.get("missing_at"):
+            if (datetime.now(MSK) - datetime.fromisoformat(loc["missing_at"])).total_seconds() < 86400:
+                return None
+            loc = None
         if not loc:
             j = iss_json(f"{ISS}/securities.json?iss.meta=off&iss.only=securities&q={FUND_ISIN}")
             rows = [r for r in iss_rows(j, "securities") if (r.get("isin") or r.get("secid")) == FUND_ISIN] \
                 or iss_rows(j, "securities")
             if not rows:
                 print("fund quote: security not found on MOEX")
+                state["fund_board"] = {"missing_at": datetime.now(MSK).isoformat()}
                 return None
             secid = rows[0]["secid"]
             j = iss_json(f"{ISS}/securities/{secid}.json?iss.meta=off&iss.only=boards")
             boards = [r for r in iss_rows(j, "boards") if r.get("is_traded") == 1]
             if not boards:
                 print("fund quote: no traded boards")
+                state["fund_board"] = {"missing_at": datetime.now(MSK).isoformat()}
                 return None
             bd = sorted(boards, key=lambda r: -(r.get("is_primary") or 0))[0]
             loc = {"secid": secid, "engine": bd["engine"], "market": bd["market"], "board": bd["boardid"]}
@@ -288,7 +294,7 @@ def fund_move(weights, ret_of, r_idx):
     return move, missing
 
 
-def calculate(now, quote, fund, exq=None):
+def calculate(now, quote, fund, exq=None, spread=SPREAD):
     """quote — цены от пользователя: сохранённые {"buy","sell","nav","date","spread"}
     или только что присланные {"new": True, "buy", "sell", "prev"}; None — оценивать самому.
     fund — (navs, weights, w_date, w_src) с сайта УК или из запаса."""
@@ -318,10 +324,11 @@ def calculate(now, quote, fund, exq=None):
     def nav_of(b_, s_):
         if b_ and s_:
             return (b_ + s_) / 2
-        return b_ / (1 + SPREAD) if b_ else s_ / (1 - SPREAD)
+        return b_ / (1 + spread) if b_ else s_ / (1 - spread)
 
     def date_of(nav_):
-        match = next((d for d, n in navs if abs(n - nav_) / n < 0.0012), None)
+        # сверяем только с последними тремя опубликованными стоимостями пая, а не со всей историей
+        match = next((d for d, n in navs[:3] if abs(n - nav_) / n < 0.0012), None)
         if match:
             return match
         later = [d for d in trading if d > d0]
@@ -334,7 +341,7 @@ def calculate(now, quote, fund, exq=None):
         if prev.get("date") == q_d:          # вторая цена из прошлого сообщения того же дня
             b, sl = b or prev.get("buy"), sl or prev.get("sell")
         q_nav = nav_of(b, sl)
-        spr = (b - sl) / (b + sl) if b and sl else SPREAD
+        spr = (b - sl) / (b + sl) if b and sl else spread
         quote = {"buy": b, "sell": sl, "nav": round(q_nav, 4), "date": q_d, "spread": spr}
         quote_status = "new"
     expected = trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0
@@ -356,7 +363,7 @@ def calculate(now, quote, fund, exq=None):
     calc = base_nav * (1 + move_now) * fee(base_d, today)
 
     # --- котировка Совкомбанка
-    s_eff = quote["spread"] if quote else SPREAD
+    s_eff = quote["spread"] if quote else spread
     if quote:
         q_date, q_nav, q_kind = quote["date"], quote["nav"], q_src
         ask = quote["buy"] or q_nav * (1 + s_eff)
@@ -370,7 +377,7 @@ def calculate(now, quote, fund, exq=None):
             q_nav, q_kind = nav0 * (1 + mv) * fee(d0, q_date), "est"
         else:
             q_date, q_nav, q_kind = d0, nav0, "site"
-        ask, bid = q_nav * (1 + SPREAD), q_nav * (1 - SPREAD)
+        ask, bid = q_nav * (1 + spread), q_nav * (1 - spread)
 
     edge_buy = calc * (1 - s_eff) / ask - 1      # купить сейчас, продать после обновления
     edge_sell = bid / (calc * (1 + s_eff)) - 1   # продать сейчас, откупить после обновления
@@ -452,7 +459,7 @@ def signal_card(c, now):
     bg, fg, soft = {"buy": ((30, 140, 80), (255, 255, 255), (214, 240, 224)),
                     "sell": ((196, 52, 44), (255, 255, 255), (250, 222, 219)),
                     "none": ((72, 84, 104), (255, 255, 255), (214, 222, 235))}[sig]
-    W, H = 1080, 640
+    W, H = 1080, 700
     img = Image.new("RGB", (W, H), bg)
     d = ImageDraw.Draw(img)
 
@@ -474,10 +481,12 @@ def signal_card(c, now):
         edge = c["edge_buy"] if buy else c["edge_sell"]
         d.text((W / 2, 275), f"выгода {pct(edge)}", font=mid, fill=fg, anchor="mm")
     d.line((80, 345, W - 80, 345), fill=soft, width=3)
+    src = {"user": " (твои)", "exchange": " (биржа)"}.get(c["q_kind"], " (оценка)")
     rows = [("Расчётная стоимость пая", rub(c["calc"])),
-            (("Продать по", rub(c["bid"])) if sig == "sell" else ("Купить по", rub(c["ask"]))),
+            ("Купить по" + src, rub(c["ask"])),
+            ("Продать по" + src, rub(c["bid"])),
             (f"Фактическая (сайт УК, {ru_date(c['d0'])[:5]})", rub(c["nav0"]))]
-    y = 395
+    y = 390
     for label, val in rows:
         d.text((80, y), label, font=small, fill=soft, anchor="lm")
         d.text((W - 80, y), val, font=font("DejaVuSans-Bold.ttf", 42), fill=fg, anchor="rm")
@@ -655,7 +664,7 @@ def main():
             fund_note = (f"\nСайт УК сейчас не ответил, стоимость пая из проверки "
                          f"{datetime.fromisoformat(fc['at']).strftime('%d.%m %H:%M')}.")
         exq = load_fund_quote(state)
-        c = calculate(now, quote, tuple(fund), exq)
+        c = calculate(now, quote, tuple(fund), exq, state.get("last_spread") or SPREAD)
         c["fund_note"] = fund_note
     except SourceError as e:
         fails = state.get("fails", 0) + 1
@@ -688,6 +697,8 @@ def main():
     # ---- котировка пользователя
     if c["quote_status"] == "new":
         state["quote"] = c["quote"]
+        if c["quote"].get("buy") and c["quote"].get("sell"):
+            state["last_spread"] = round(c["quote"]["spread"], 5)   # запоминаем реальный спред Совкомбанка
         qq = c["quote"]
         parts = [f"купить по {rub(qq['buy'])}" if qq.get("buy") else None,
                  f"продать по {rub(qq['sell'])}" if qq.get("sell") else None]
