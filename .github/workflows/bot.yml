@@ -2,8 +2,9 @@ name: Bot
 
 on:
   schedule:
-    # каждые 10 минут с 07:00 до 00:50 МСК (время в cron — UTC)
-    - cron: '*/10 4-21 * * *'
+    # основной запуск — cron-job.org каждые 10 минут (workflow_dispatch, mode=auto);
+    # расписание GitHub — запасное, раз в час
+    - cron: '23 * * * *'
   workflow_dispatch:
     inputs:
       mode:

@@ -19,7 +19,7 @@ Android-приложение: сравнивает котировку пая О�
 
 ## Telegram-бот
 
-`bot/mp_bot.py` запускается через GitHub Actions каждые 10 минут с 07:00 до 00:50 МСК (`.github/workflows/bot.yml`).
+`bot/mp_bot.py` запускается через GitHub Actions (`.github/workflows/bot.yml`): каждые 10 минут его вызывает cron-job.org через API (`workflow_dispatch`, `mode=auto`), запасной запуск по расписанию GitHub — раз в час.
 
 | Событие | Что пишет |
 |---|---|
