@@ -44,7 +44,8 @@ FUND_FEE = env_float("FUND_FEE", 2.95) / 100    # годовые расходы 
 QUOTE_LAG = int(env_float("QUOTE_LAG_DAYS", 1)) # котировка = стоимость пая за N-й торговый день назад
 SUMMARY_HOUR = int(env_float("SUMMARY_HOUR", 19))
 REPEAT_HOURS = 3        # повтор действующего сигнала не чаще
-FAILS_TO_ALERT = 2      # подряд неудачных запусков до оповещения о связи
+FAILS_TO_ALERT = 3      # подряд неудачных проверок (по 10 минут) до оповещения о связи
+REMIND_EVERY = 18       # напоминание «связи всё ещё нет» — раз в 3 часа
 
 DEF_WEIGHTS = [("LKOH", "Лукойл", 9.71), ("SVCB", "Совкомбанк", 8.49), ("SBER", "Сбербанк", 8.43),
                ("DOMRF", "ДОМ.РФ", 8.30), ("T", "Т-Технологии", 7.95), ("TATNP", "Татнефть-п", 6.66),
@@ -462,7 +463,7 @@ def tg_photo(chat_id, png, caption):
 
 def send(state, text):
     tg("sendMessage", chat_id=state["chat_id"], text=text, parse_mode="HTML", disable_web_page_preview="true")
-    print("SENT:", text.split("\n")[0])
+    print("message sent")
 
 
 def send_signal(state, c, now, text=None):
@@ -471,7 +472,7 @@ def send_signal(state, c, now, text=None):
     if png:
         try:
             tg_photo(state["chat_id"], png, text[:1024])
-            print("SENT PHOTO:", c["signal"])
+            print("card sent")
             return
         except Exception as e:  # noqa: BLE001
             print("sendPhoto failed, fallback to text:", e)
@@ -548,9 +549,9 @@ def main():
         return 0
     if state.pop("welcome", False):
         send(state, "👋 Бот «Лаг Маркет Пауэр» подключён.\n"
-                    f"Проверяю каждый час с 7 до 0 МСК, сигнал при выгоде от {str(THRESHOLD * 100).replace('.', ',')}% после спреда, "
+                    f"Проверяю каждые 10 минут с 7 до 1 МСК, сигнал при выгоде от {str(THRESHOLD * 100).replace('.', ',')}% после спреда, "
                     f"сводка около {SUMMARY_HOUR}:00.\n"
-                    "Команды (ответ — при ближайшей проверке):\n"
+                    "Команды (ответ — при ближайшей проверке, до 10 минут):\n"
                     "• «статус» — текущий расчёт\n"
                     "• «купить по 154,83» — цена покупки пая в приложении\n"
                     "• «продать по 153,29» — цена продажи пая в приложении\n"
@@ -609,7 +610,7 @@ def main():
                         f"Неудачных проверок подряд: {fails}. Сигналы не приходят, пока связь не вернётся. "
                         f"Сообщу, когда восстановится.")
             state["alerted"] = True
-        elif fails > FAILS_TO_ALERT and fails % 6 == 0:
+        elif fails > FAILS_TO_ALERT and fails % REMIND_EVERY == 0:
             send(state, f"⚠️ Связи всё ещё нет: {e.source} — {e.detail}. Проверок без данных подряд: {fails}.")
         if got_prices:
             state["quote"] = {"new": True, "buy": inc["buy"], "sell": inc["sell"]}
@@ -644,7 +645,7 @@ def main():
                     "Пришли новые: «купить по …» и «продать по …»")
     elif c["quote"]:
         state["quote"] = c["quote"]
-    print(json.dumps({k: v for k, v in c.items() if k != "missing"}, ensure_ascii=False, default=str))
+    print("check ok, signal:", c["signal"])
 
     # ---- сигнал
     last, last_at = state.get("signal", "none"), state.get("signal_at")

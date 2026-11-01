@@ -2,8 +2,8 @@ name: Bot
 
 on:
   schedule:
-    # каждый час в :07, с 07:07 до 00:07 МСК (время в cron — UTC)
-    - cron: '7 4-21 * * *'
+    # каждые 10 минут с 07:00 до 00:50 МСК (время в cron — UTC)
+    - cron: '*/10 4-21 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -12,6 +12,9 @@ on:
   push:
     branches: [main]
     paths: ['bot/**', '.github/workflows/bot.yml']
+
+permissions:
+  contents: write   # только для keepalive-коммита
 
 concurrency:
   group: bot
@@ -43,6 +46,18 @@ jobs:
           THRESHOLD: '3'
           SPREAD: '0.5'
           SUMMARY_HOUR: '19'
+
+      - name: Keep schedule alive
+        # GitHub выключает расписание в публичном репозитории после 60 дней без коммитов
+        if: github.event_name == 'schedule'
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( ($(date +%s) - last) / 86400 )) -ge 45 ]; then
+            git config user.name "mp-bot"
+            git config user.email "mp-bot@users.noreply.github.com"
+            git commit --allow-empty -m "keepalive: расписание бота активно"
+            git push
+          fi
 
       - name: Save bot memory
         if: always()
