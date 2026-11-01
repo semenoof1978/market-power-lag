@@ -108,6 +108,8 @@ def ok(x):
 
 
 def rub(x):
+    if not ok(x):
+        return "—"
     return f"{x:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
 
 
@@ -120,6 +122,8 @@ def fmt_pct(x):
 
 
 def pct(x):
+    if x is None or x != x:
+        return "—"
     s = f"{x * 100:+.2f}".replace(".", ",")
     return s + "%"
 
@@ -490,7 +494,7 @@ def signal_card(c, now, notes=()):
     rows = [("Расчётная стоимость пая", rub(c["calc"])),
             ("Купить по" + src, rub(c["ask"])),
             ("Продать по" + src, rub(c["bid"])),
-            (f"Фактическая (сайт УК, {ru_date(c['d0'])[:5]})", rub(c["nav0"]))]
+            (f"Фактическая (сайт УК, {ru_date(c['d0'])[:5]})" if c.get("d0") else "Фактическая (сайт УК)", rub(c.get("nav0")))]
     y = 390
     for label, val in rows:
         d.text((80, y), label, font=small, fill=soft, anchor="lm")
