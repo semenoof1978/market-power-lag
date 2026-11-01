@@ -652,6 +652,8 @@ HELP_TEXT = ("📖 Команды (ответ — при ближайшей пр
              "• «купил 100 по 154,83» / «продал 100 по 151,78» — записать сделку; без цены — по текущей\n"
              "• «сделки» — открытые круги и итог\n"
              "• «помощь» — этот список\n\n"
+             "По-английски тоже можно: status, buy at 154.83 sell at 151.78, reset, bought 100 at 154.83, "
+             "sold 100 at 151.78, trades, help.\n\n"
              "Карточки: 🟩 ПОКУПАТЬ / 🟥 ПРОДАВАТЬ — выгода выше порога; ⬜ ДЕРЖАТЬ — ничего не делать. "
              "ПРЕДВАРИТЕЛЬНО — идут торги, сигнал может исчезнуть; ПОДТВЕРЖДЕНО — торги закрыты.")
 
@@ -676,22 +678,22 @@ def incoming(state):
         if chat != state.get("chat_id"):
             continue
         text = (m.get("text") or "").lower().strip()
-        if re.search(r"статус|status|сейчас|обнов|/start", text):
+        if re.search(r"статус|status|сейчас|обнов|/start|update|refresh|\bnow\b", text):
             res["asked"] = True
-        if re.search(r"помощь|help|команды|/help", text):
+        if re.search(r"помощь|help|команды|commands|/help", text):
             res["help"] = True
-        if re.search(r"^/?сделки\b", text):
+        if re.search(r"^/?(сделки|trades)\b", text):
             res["list"] = True
-        for m3 in re.finditer(r"(купил|докупил|продал)\s+(\d{1,6})(?:\s*(?:шт\.?|па[её]в|пая|пай))?"
-                              r"(?:\s*(?:по|за)\s*" + PRICE_RE + ")?", text):
+        for m3 in re.finditer(r"(купил|докупил|продал|bought|sold)\s+(\d{1,6})(?:\s*(?:шт\.?|па[её]в|пая|пай|units?|pcs))?"
+                              r"(?:\s*(?:по|за|at|@|for)\s*" + PRICE_RE + ")?", text):
             px_ = num(m3.group(3)) if m3.group(3) else None
-            res["trades"].append(("buy" if m3.group(1) != "продал" else "sell", int(m3.group(2)),
+            res["trades"].append(("sell" if m3.group(1) in ("продал", "sold") else "buy", int(m3.group(2)),
                                   px_ if px_ and 20 < px_ < 2000 else None))
-        if re.search(r"^(сброс|цены авто|котировка авто|авто)\b", text):
+        if re.search(r"^(сброс|цены авто|котировка авто|авто|reset|auto)\b", text):
             res.update(quote_off=True, buy=None, sell=None)
             continue
-        for key, pat in (("buy", r"(?:купить|покупка|продают)\s*(?:по|за)?\s*:?\s*" + PRICE_RE),
-                         ("sell", r"(?:продать|продажа|покупают)\s*(?:по|за)?\s*:?\s*" + PRICE_RE),
+        for key, pat in (("buy", r"(?:купить|покупка|продают|\bbuy)\s*(?:по|за|at|@)?\s*:?\s*" + PRICE_RE),
+                         ("sell", r"(?:продать|продажа|покупают|\bsell)\s*(?:по|за|at|@)?\s*:?\s*" + PRICE_RE),
                          ("buy", r"котировк\w*\s*:?\s*" + PRICE_RE)):
             for m2 in re.finditer(pat, text):
                 v = num(m2.group(1))
