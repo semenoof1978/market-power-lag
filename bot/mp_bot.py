@@ -236,6 +236,42 @@ def load_market(tickers):
     return cur, idx, upd
 
 
+FUND_ISIN = "RU000A107G30"
+
+
+def load_fund_quote(state):
+    """Котировки маркет-мейкера по паю на Мосбирже: {"bid", "offer", "time", "board"} или None."""
+    try:
+        loc = state.get("fund_board")
+        if not loc:
+            j = iss_json(f"{ISS}/securities.json?iss.meta=off&iss.only=securities&q={FUND_ISIN}")
+            rows = [r for r in iss_rows(j, "securities") if (r.get("isin") or r.get("secid")) == FUND_ISIN] \
+                or iss_rows(j, "securities")
+            if not rows:
+                print("fund quote: security not found on MOEX")
+                return None
+            secid = rows[0]["secid"]
+            j = iss_json(f"{ISS}/securities/{secid}.json?iss.meta=off&iss.only=boards")
+            boards = [r for r in iss_rows(j, "boards") if r.get("is_traded") == 1]
+            if not boards:
+                print("fund quote: no traded boards")
+                return None
+            bd = sorted(boards, key=lambda r: -(r.get("is_primary") or 0))[0]
+            loc = {"secid": secid, "engine": bd["engine"], "market": bd["market"], "board": bd["boardid"]}
+            state["fund_board"] = loc
+        j = iss_json(f"{ISS}/engines/{loc['engine']}/markets/{loc['market']}/boards/{loc['board']}"
+                     f"/securities/{loc['secid']}.json?iss.meta=off&iss.only=marketdata")
+        r = (iss_rows(j, "marketdata") or [{}])[0]
+        bid, offer = r.get("BID"), r.get("OFFER")
+        print("fund quote:", loc["board"], loc["secid"], "bid", bid, "offer", offer, "last", r.get("LAST"))
+        if ok(bid) and ok(offer) and offer >= bid and offer / bid < 1.06:
+            return {"bid": bid, "offer": offer, "time": (r.get("UPDATETIME") or r.get("TIME") or "")[:5],
+                    "board": loc["board"]}
+    except Exception as e:  # noqa: BLE001
+        print("fund quote unavailable:", e)
+    return None
+
+
 # ---------------------------------------------------------------- model
 def fund_move(weights, ret_of, r_idx):
     """Изменение стоимости пая: Σ вес × доходность бумаги + остаток × индекс."""
@@ -252,7 +288,7 @@ def fund_move(weights, ret_of, r_idx):
     return move, missing
 
 
-def calculate(now, quote, fund):
+def calculate(now, quote, fund, exq=None):
     """quote — цены от пользователя: сохранённые {"buy","sell","nav","date","spread"}
     или только что присланные {"new": True, "buy", "sell", "prev"}; None — оценивать самому.
     fund — (navs, weights, w_date, w_src) с сайта УК или из запаса."""
@@ -279,22 +315,21 @@ def calculate(now, quote, fund):
         return 1 - FUND_FEE * (date.fromisoformat(b) - date.fromisoformat(a)).days / 365
 
     # --- котировка пользователя: определить, за какую дату в ней стоимость пая
+    def nav_of(b_, s_):
+        if b_ and s_:
+            return (b_ + s_) / 2
+        return b_ / (1 + SPREAD) if b_ else s_ / (1 - SPREAD)
+
+    def date_of(nav_):
+        match = next((d for d, n in navs if abs(n - nav_) / n < 0.0012), None)
+        if match:
+            return match
+        later = [d for d in trading if d > d0]
+        return later[0] if later else (trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0)
+
     quote_status = None
     if quote and quote.get("new"):
         b, sl, prev = quote.get("buy"), quote.get("sell"), quote.get("prev") or {}
-
-        def nav_of(b_, s_):
-            if b_ and s_:
-                return (b_ + s_) / 2
-            return b_ / (1 + SPREAD) if b_ else s_ / (1 - SPREAD)
-
-        def date_of(nav_):
-            match = next((d for d, n in navs if abs(n - nav_) / n < 0.0012), None)
-            if match:
-                return match
-            later = [d for d in trading if d > d0]
-            return later[0] if later else (trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0)
-
         q_d = date_of(nav_of(b, sl))
         if prev.get("date") == q_d:          # вторая цена из прошлого сообщения того же дня
             b, sl = b or prev.get("buy"), sl or prev.get("sell")
@@ -305,10 +340,16 @@ def calculate(now, quote, fund):
     expected = trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0
     if quote and quote_status != "new" and quote["date"] < expected:
         quote, quote_status = None, "expired"   # прошёл новый торговый день — котировка обновилась
+    q_src = "user" if quote else None
+    if not quote and exq:                        # цены маркет-мейкера с Мосбиржи
+        b, sl = exq["offer"], exq["bid"]
+        q_nav = nav_of(b, sl)
+        quote = {"buy": b, "sell": sl, "nav": round(q_nav, 4), "date": date_of(q_nav), "spread": (b - sl) / (b + sl)}
+        q_src = "exchange"
 
     # --- база расчёта: котировка пользователя, если есть, иначе сайт УК
     if quote and quote["date"] in idx_hist:
-        base_d, base_nav, base_src = quote["date"], quote["nav"], "user"
+        base_d, base_nav, base_src = quote["date"], quote["nav"], q_src
     else:
         base_d, base_nav, base_src = d0, nav0, "site"
     move_now, missing = move_between(base_d, lambda t: cur.get(t), idx_now)
@@ -317,7 +358,7 @@ def calculate(now, quote, fund):
     # --- котировка Совкомбанка
     s_eff = quote["spread"] if quote else SPREAD
     if quote:
-        q_date, q_nav, q_kind = quote["date"], quote["nav"], "user"
+        q_date, q_nav, q_kind = quote["date"], quote["nav"], q_src
         ask = quote["buy"] or q_nav * (1 + s_eff)
         bid = quote["sell"] or q_nav * (1 - s_eff)
     else:
@@ -340,16 +381,21 @@ def calculate(now, quote, fund):
         "d0": d0, "nav0": nav0, "q_date": q_date, "q_nav": q_nav, "q_kind": q_kind,
         "ask": ask, "bid": bid, "edge_buy": edge_buy, "edge_sell": edge_sell,
         "upd": upd, "w_src": w_src, "w_date": w_date,
-        "quote": quote, "quote_status": quote_status, "spread": s_eff,
+        "quote": quote if q_src == "user" else None, "quote_status": quote_status, "spread": s_eff,
+        "q_view": quote, "exq": exq,
     }
 
 
 # ---------------------------------------------------------------- messages
 def msg_body(c, now):
-    base = (f"от твоих цен за {ru_date(c['base_d'])}" if c["base_src"] == "user"
-            else f"к {ru_date(c['base_d'])}")
-    if c["q_kind"] == "user":
-        qq = c["quote"]
+    base = {"user": f"от твоих цен за {ru_date(c['base_d'])}",
+            "exchange": f"от цен пая на Мосбирже (за {ru_date(c['base_d'])})"}.get(c["base_src"], f"к {ru_date(c['base_d'])}")
+    exq = c.get("exq")
+    if c["q_kind"] == "exchange":
+        q = (f"купить по <b>{rub(c['ask'])}</b>, продать по <b>{rub(c['bid'])}</b> (Мосбиржа, {exq['time'] or 'сейчас'})\n"
+             f"   стоимость пая в ценах {rub(c['q_nav'])} за {ru_date(c['q_date'])}")
+    elif c["q_kind"] == "user":
+        qq = c["q_view"]
         b = f"<b>{rub(c['ask'])}</b>" if qq.get("buy") else f"≈ {rub(c['ask'])}"
         sl = f"<b>{rub(c['bid'])}</b>" if qq.get("sell") else f"≈ {rub(c['bid'])}"
         q = (f"купить по {b}, продать по {sl} (прислал ты)\n"
@@ -364,9 +410,13 @@ def msg_body(c, now):
         f"Расчётная стоимость пая: <b>{rub(c['calc'])}</b>",
         f"   по ценам Мосбиржи на {(c['upd'] or now.strftime('%H:%M'))[:5]} МСК, {pct(c['move'])} {base}",
         f"Фактическая стоимость пая: <b>{rub(c['nav0'])}</b> (сайт УК, {ru_date(c['d0'])})",
-        f"Цены в Совкомбанке: {q}",
+        f"Цены пая: {q}",
         f"Выгода с учётом спреда ±{fmt_pct(c['spread'])}: покупка {pct(c['edge_buy'])}, выход {pct(c['edge_sell'])}",
     ]
+    if c["q_kind"] == "user" and exq:
+        lines.append(f"На Мосбирже сейчас: купить {rub(exq['offer'])}, продать {rub(exq['bid'])}")
+    elif c["q_kind"] != "exchange":
+        lines.append("Котировок пая на Мосбирже сейчас нет")
     if c["missing"]:
         lines.append("Нет цен по: " + ", ".join(c["missing"]) + " — взял их как индекс.")
     return "\n".join(lines)
@@ -382,7 +432,7 @@ def msg_signal(c, now):
 
 def msg_summary(c, now):
     state = {"buy": "🟩 ПОКУПАТЬ", "sell": "🟥 ПРОДАВАТЬ", "none": "⬜ ДЕРЖАТЬ"}[c["signal"]]
-    tip = "" if c["q_kind"] == "user" else "\n\nДля точного расчёта пришли цены из приложения: «купить по 154,83» и «продать по 153,29»"
+    tip = "" if c["q_kind"] in ("user", "exchange") else "\n\nДля точного расчёта пришли цены из приложения: «купить по 154,83» и «продать по 153,29»"
     return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state} (порог {str(THRESHOLD * 100).replace('.', ',')}%)\n\n"
             f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{c.get('fund_note', '')}{tip}")
 
@@ -471,7 +521,13 @@ def send_signal(state, c, now, text=None):
     png = signal_card(c, now)
     if png:
         try:
-            tg_photo(state["chat_id"], png, text[:1024])
+            cap, rest = text, ""
+            if len(text) > 1000:                       # подпись к фото — до 1024 символов, режем по строке
+                cut = text.rfind("\n", 0, 1000)
+                cap, rest = text[:cut], text[cut + 1:]
+            tg_photo(state["chat_id"], png, cap)
+            if rest.strip():
+                send(state, rest)
             print("card sent")
             return
         except Exception as e:  # noqa: BLE001
@@ -598,7 +654,8 @@ def main():
             fund[0] = [tuple(x) for x in fund[0]]
             fund_note = (f"\nСайт УК сейчас не ответил, стоимость пая из проверки "
                          f"{datetime.fromisoformat(fc['at']).strftime('%d.%m %H:%M')}.")
-        c = calculate(now, quote, tuple(fund))
+        exq = load_fund_quote(state)
+        c = calculate(now, quote, tuple(fund), exq)
         c["fund_note"] = fund_note
     except SourceError as e:
         fails = state.get("fails", 0) + 1
