@@ -260,6 +260,45 @@ def load_market(tickers):
     return cur, idx, upd, vals.get("MCFTRR")
 
 
+# ---------------------------------------------------------------- dividends (smart-lab)
+SL_PAGE = {"TATNP": "TATN", "SNGSP": "SNGS", "SBERP": "SBER", "MTLRP": "MTLR", "RTKMP": "RTKM", "BANEP": "BANE"}
+DIV_ROW = re.compile(r"<td>\s*([A-Z0-9]{1,8})\s*</td>\s*<td>\s*(\d{2}\.\d{2}\.\d{4})\s*</td>\s*"
+                     r"<td>\s*(\d{2}\.\d{2}\.\d{4})\s*</td>\s*<td>[^<]*</td>\s*<td>\s*<strong[^>]*>\s*([\d\s.,]+?)\s*</strong>", re.S)
+
+
+def ru2iso(s_):
+    return f"{s_[6:10]}-{s_[3:5]}-{s_[0:2]}"
+
+
+def load_dividends(tickers, state, now):
+    """Дивиденды бумаг фонда со smart-lab: {тикер: [(последний день с дивидендом T-1, сумма)]}.
+    Обновляются раз в 12 часов; при сбое — прошлые данные."""
+    cache = state.get("div_cache") or {}
+    if cache.get("at") and (now - datetime.fromisoformat(cache["at"])).total_seconds() < 12 * 3600 \
+            and set(tickers) <= set(cache.get("checked", [])):
+        return {t: [tuple(x) for x in v] for t, v in cache.get("data", {}).items()}
+    data, checked = {}, []
+    for t in tickers:
+        pages = [SL_PAGE.get(t, t)] + (["TRNF"] if t == "TRNFP" else [])
+        for page in pages:
+            try:
+                html = http_get(f"https://smart-lab.ru/q/{page}/dividend/", timeout=20, tries=2)
+            except Exception:  # noqa: BLE001
+                continue
+            rows = [(ru2iso(m.group(2)), num(m.group(4))) for m in DIV_ROW.finditer(html) if m.group(1) == t]
+            rows = [(d, v) for d, v in rows if ok(v)]
+            if rows:
+                data[t] = sorted(set(rows))
+                break
+        checked.append(t)
+    if data or not cache.get("data"):
+        state["div_cache"] = {"at": now.isoformat(), "data": data, "checked": checked}
+    else:
+        data = {t: [tuple(x) for x in v] for t, v in cache["data"].items()}
+    print("dividends loaded for", len(data), "tickers")
+    return data
+
+
 FUND_ISIN = "RU000A107G30"
 
 
@@ -318,7 +357,7 @@ def fund_move(weights, ret_of, r_idx):
     return move, missing
 
 
-def calculate(now, quote, fund, exq=None, spread=SPREAD):
+def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
     """quote — цены от пользователя: сохранённые {"buy","sell","nav","date","spread"}
     или только что присланные {"new": True, "buy", "sell", "prev"}; None — оценивать самому.
     fund — (navs, weights, w_date, w_src) с сайта УК или из запаса."""
@@ -341,13 +380,19 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD):
             return tr_b / tr_hist[a] - 1
         return idx_b / idx_hist[a] - 1
 
-    def move_between(a, price_b, idx_b, tr_b=None):
-        """Изменение пая от закрытия дня a до цен price_b(t) и индексов на момент b."""
+    divs = divs or {}
+
+    def move_between(a, price_b, idx_b, tr_b=None, b_date=None):
+        """Изменение пая от закрытия дня a до цен price_b(t) и индексов на момент b.
+        Дивиденд, отрезанный между a и b, возвращаем в доходность бумаги: стоимость пая из-за него не падает."""
+        b_date = b_date or today
+
         def r(t):
             pa, pb = hist.get(t, {}).get(a), price_b(t)
             if not (ok(pa) and ok(pb)):
                 return None
-            x = pb / pa - 1
+            div = sum(v for t1, v in divs.get(t, []) if a <= t1 < b_date)
+            x = (pb + div) / pa - 1
             return None if abs(x) > 0.20 else x      # сплит/консолидация (как у T и TRNFP) — берём как индекс
         return fund_move(weights, r, rest_ret(a, idx_b, tr_b))
 
@@ -407,11 +452,18 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD):
         if q_date in nav_map:
             q_nav, q_kind = nav_map[q_date], "site"
         elif q_date > d0 and q_date in idx_hist:
-            mv, _ = move_between(d0, lambda t: hist.get(t, {}).get(q_date), idx_hist[q_date], tr_hist.get(q_date))
+            mv, _ = move_between(d0, lambda t: hist.get(t, {}).get(q_date), idx_hist[q_date], tr_hist.get(q_date), q_date)
             q_nav, q_kind = nav0 * (1 + mv) * fee(d0, q_date), "est"
         else:
             q_date, q_nav, q_kind = d0, nav0, "site"
         ask, bid = q_nav * (1 + spread), q_nav * (1 - spread)
+
+    check = None
+    if len(navs) >= 2:
+        (dd, nd), (pp, npp) = navs[0], navs[1]
+        if dd in idx_hist and pp in idx_hist:
+            mv, _ = move_between(pp, lambda t: hist.get(t, {}).get(dd), idx_hist[dd], tr_hist.get(dd), dd)
+            check = {"date": dd, "model": (1 + mv) * fee(pp, dd) - 1, "fact": nd / npp - 1}
 
     edge_buy = calc * (1 - s_eff) / ask - 1      # купить сейчас, продать после обновления
     edge_sell = bid / (calc * (1 + s_eff)) - 1   # продать сейчас, откупить после обновления
@@ -423,7 +475,7 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD):
         "ask": ask, "bid": bid, "edge_buy": edge_buy, "edge_sell": edge_sell,
         "upd": upd, "w_src": w_src, "w_date": w_date,
         "quote": quote if q_src == "user" else None, "quote_status": quote_status, "spread": s_eff,
-        "q_view": quote, "exq": exq,
+        "q_view": quote, "exq": exq, "check": check, "expected": expected,
     }
 
 
@@ -483,13 +535,13 @@ def msg_summary(c, now):
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
 
-def signal_card(c, now, notes=()):
+def signal_card(c, now, notes=(), word=None, sub=None, color=None):
     """PNG: крупное слово на зелёном или красном фоне. None, если Pillow нет."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         return None
-    sig = c["signal"]
+    sig = color or c["signal"]
     buy = sig == "buy"
     bg, fg, soft = {"buy": ((30, 140, 80), (255, 255, 255), (214, 240, 224)),
                     "sell": ((196, 52, 44), (255, 255, 255), (250, 222, 219)),
@@ -505,13 +557,15 @@ def signal_card(c, now, notes=()):
         return ImageFont.load_default()
 
     big, mid, small = font("DejaVuSans-Bold.ttf", 150), font("DejaVuSans-Bold.ttf", 52), font("DejaVuSans.ttf", 38)
-    word = {"buy": "ПОКУПАТЬ", "sell": "ПРОДАВАТЬ", "none": "ДЕРЖАТЬ"}[sig]
+    word = word or {"buy": "ПОКУПАТЬ", "sell": "ПРОДАВАТЬ", "none": "ДЕРЖАТЬ"}[sig]
     while d.textlength(word, font=big) > W - 100 and big.size > 60:
         big = font("DejaVuSans-Bold.ttf", big.size - 10)
     d.text((W / 2, 150), word, font=big, fill=fg, anchor="mm")
     tag = "ПРЕДВАРИТЕЛЬНО · идут торги" if in_session(now) else "ПОДТВЕРЖДЕНО · торги закрыты"
     d.text((W / 2, 46), tag, font=font("DejaVuSans-Bold.ttf", 30), fill=soft, anchor="mm")
-    if sig == "none":
+    if sub:
+        d.text((W / 2, 275), sub, font=font("DejaVuSans-Bold.ttf", 44), fill=fg, anchor="mm")
+    elif sig == "none":
         sub = f"покупка {pct(c['edge_buy'])} · выход {pct(c['edge_sell'])}"
         d.text((W / 2, 275), sub, font=font("DejaVuSans-Bold.ttf", 44), fill=fg, anchor="mm")
     else:
@@ -566,14 +620,14 @@ def send(state, text):
     print("message sent")
 
 
-def send_signal(state, c, now, text=None):
+def send_signal(state, c, now, text=None, notes=None, **card):
     text = text or msg_signal(c, now)
-    notes = []                                   # всё — на карточке, подписи нет
+    notes = list(notes or [])                    # всё — на карточке, подписи нет
     if c.get("missing"):
         notes.append("нет цен: " + ", ".join(c["missing"]) + " — взял как индекс")
     if c.get("fund_note"):
         notes.append("сайт УК не ответил, стоимость пая из прошлой проверки")
-    png = signal_card(c, now, notes)
+    png = signal_card(c, now, notes, **card)
     if png:
         try:
             tg_photo(state["chat_id"], png, "")
@@ -586,10 +640,20 @@ def send_signal(state, c, now, text=None):
 
 PRICE_RE = r"(\d{2,4}(?:[.,]\d{1,2})?)"
 
+HELP_TEXT = ("📖 Команды (ответ — при ближайшей проверке, до 10 минут):\n"
+             "• «статус» или «обнови» — карточка с текущим расчётом\n"
+             "• «купить по 154,83 продать по 151,78» — цены пая из приложения, расчёт станет точным\n"
+             "• «сброс» — снова оценивать цены самому\n"
+             "• «купил 100 по 154,83» / «продал 100 по 151,78» — записать сделку; без цены — по текущей\n"
+             "• «сделки» — открытые круги и итог\n"
+             "• «помощь» — этот список\n\n"
+             "Карточки: 🟩 ПОКУПАТЬ / 🟥 ПРОДАВАТЬ — выгода выше порога; ⬜ ДЕРЖАТЬ — ничего не делать. "
+             "ПРЕДВАРИТЕЛЬНО — идут торги, сигнал может исчезнуть; ПОДТВЕРЖДЕНО — торги закрыты.")
+
 
 def incoming(state):
     """chat_id из первого сообщения, «статус», «купить по 154,83», «продать по 153,29», «сброс»."""
-    res = {"asked": False, "buy": None, "sell": None, "quote_off": False}
+    res = {"asked": False, "buy": None, "sell": None, "quote_off": False, "trades": [], "help": False, "list": False}
     try:
         upd = tg("getUpdates", offset=state.get("tg_offset", 0), timeout=0)
     except Exception as e:  # noqa: BLE001
@@ -609,6 +673,15 @@ def incoming(state):
         text = (m.get("text") or "").lower().strip()
         if re.search(r"статус|status|сейчас|обнов|/start", text):
             res["asked"] = True
+        if re.search(r"помощь|help|команды|/help", text):
+            res["help"] = True
+        if re.search(r"^/?сделки\b", text):
+            res["list"] = True
+        for m3 in re.finditer(r"(купил|докупил|продал)\s+(\d{1,6})(?:\s*(?:шт\.?|па[её]в|пая|пай))?"
+                              r"(?:\s*(?:по|за)\s*" + PRICE_RE + ")?", text):
+            px_ = num(m3.group(3)) if m3.group(3) else None
+            res["trades"].append(("buy" if m3.group(1) != "продал" else "sell", int(m3.group(2)),
+                                  px_ if px_ and 20 < px_ < 2000 else None))
         if re.search(r"^(сброс|цены авто|котировка авто|авто)\b", text):
             res.update(quote_off=True, buy=None, sell=None)
             continue
@@ -660,7 +733,8 @@ def main():
                     "• «статус» — текущий расчёт\n"
                     "• «купить по 154,83» — цена покупки пая в приложении\n"
                     "• «продать по 153,29» — цена продажи пая в приложении\n"
-                    "• «сброс» — снова оценивать цены самому")
+                    "• «сброс» — снова оценивать цены самому\n"
+                    "• «помощь» — все команды")
     elif not state.get("v2_notice"):
         send(state, "🆕 Обновление бота:\n"
                     "• «котировка 154,83» — пришли цену «Продают по» из приложения, буду считать от неё\n"
@@ -673,7 +747,16 @@ def main():
                     "• «продать по 153,29» — цена продажи\n"
                     "Можно одной строкой или по очереди. С обеими ценами бот знает реальный спред.\n"
                     "• «сброс» — снова оценивать цены самому")
-    state["v2_notice"] = state["v3_notice"] = True
+    elif not state.get("v4_notice"):
+        send(state, "🆕 Новое в боте:\n"
+                    "• учёт сделок: «купил 100 по 154,83», «продал 100 по 151,78», «сделки»\n"
+                    "• бот напомнит закрыть круг, когда Совкомбанк обновит цену\n"
+                    "• сам проверяет точность модели и учитывает дивиденды\n"
+                    "• утром в будни напомнит прислать цены\n"
+                    "• «помощь» — все команды")
+    state["v2_notice"] = state["v3_notice"] = state["v4_notice"] = True
+    if inc["help"]:
+        send(state, HELP_TEXT)
     if inc["quote_off"]:
         state.pop("quote", None)
         send(state, "Ок, цены снова оцениваю сам.")
@@ -704,7 +787,12 @@ def main():
             fund_note = (f"\nСайт УК сейчас не ответил, стоимость пая из проверки "
                          f"{datetime.fromisoformat(fc['at']).strftime('%d.%m %H:%M')}.")
         exq = load_fund_quote(state)
-        c = calculate(now, quote, tuple(fund), exq, state.get("last_spread") or SPREAD)
+        try:
+            divs = load_dividends([t for t, _, _ in fund[1]], state, now)
+        except Exception as e:  # noqa: BLE001
+            print("dividends failed:", e)
+            divs = {}
+        c = calculate(now, quote, tuple(fund), exq, state.get("last_spread") or SPREAD, divs)
         c["fund_note"] = fund_note
     except SourceError as e:
         fails = state.get("fails", 0) + 1
@@ -753,24 +841,113 @@ def main():
     elif c["quote"]:
         state["quote"] = c["quote"]
     print("check ok, signal:", c["signal"])
+    today = now.date().isoformat()
+
+    # ---- самопроверка модели по новой стоимости пая
+    ck = c.get("check")
+    if ck and state.get("check_date") != ck["date"]:
+        err = ck["model"] - ck["fact"]
+        errs = (state.get("model_errs") or [])[-19:] + [round(err, 5)]
+        state.update(model_errs=errs, check_date=ck["date"])
+        recent = errs[-5:]
+        mae5 = sum(abs(x) for x in recent) / len(recent)
+        if abs(err) > 0.01:
+            send(state, f"⚠️ Модель ошиблась на {fmt_pct(abs(err))} за {ru_date(ck['date'])}: прогноз {pct(ck['model'])}, "
+                        f"факт {pct(ck['fact'])}. Если повторится, значит УК поменяла состав фонда — сигналам доверяй осторожнее.")
+        elif len(recent) >= 5 and mae5 > 0.006:
+            send(state, f"⚠️ Точность модели снизилась: средняя ошибка за 5 дней {fmt_pct(mae5)}. Сигналам доверяй осторожнее.")
+    errs = state.get("model_errs") or []
+    acc_note = (f"точность модели: ±{fmt_pct(sum(abs(x) for x in errs[-5:]) / len(errs[-5:]))} за {len(errs[-5:])} дн."
+                if errs else None)
+
+    # ---- сделки и круги
+    rounds = state.setdefault("rounds", [])
+    for side, qty, price in inc["trades"]:
+        if qty <= 0:
+            continue
+        price = price or (c["ask"] if side == "buy" else c["bid"])
+        closing = "short" if side == "buy" else "long"
+        remaining, profit, closed_cost = qty, 0.0, 0.0
+        for r in [r for r in rounds if r["side"] == closing]:
+            if remaining <= 0:
+                break
+            m = min(remaining, r["qty"])
+            gain = m * (r["price"] - price) if closing == "short" else m * (price - r["price"])
+            profit += gain
+            closed_cost += m * r["price"]
+            r["qty"] -= m
+            remaining -= m
+        rounds[:] = [r for r in rounds if r["qty"] > 0]
+        lines = []
+        if closed_cost:
+            state["realized"] = round(state.get("realized", 0.0) + profit, 2)
+            state.setdefault("closed", []).append({"at": now.isoformat(), "profit": round(profit, 2),
+                                                    "pct": round(profit / closed_cost, 5)})
+            state["closed"] = state["closed"][-50:]
+            lines.append(f"✅ Круг закрыт: {rub(profit) if profit >= 0 else '−' + rub(-profit)} "
+                         f"({pct(profit / closed_cost)}). Итого по всем кругам: {rub(state['realized'])}.")
+        if remaining > 0:
+            rounds.append({"side": "long" if side == "buy" else "short", "qty": remaining, "price": price,
+                           "date": c["expected"], "at": now.isoformat(), "reminded": False})
+            act = "купил" if side == "buy" else "продал"
+            nxt = "продать" if side == "buy" else "откупить"
+            lines.append(f"📝 Записал: {act} {remaining} шт. по {rub(price)}. Напомню {nxt}, когда Совкомбанк обновит цену.")
+        send(state, "\n".join(lines))
+    if inc["list"]:
+        if rounds:
+            body = "\n".join(f"• {'купил' if r['side'] == 'long' else 'продал'} {r['qty']} шт. по {rub(r['price'])} "
+                             f"({datetime.fromisoformat(r['at']).strftime('%d.%m %H:%M')})" for r in rounds)
+        else:
+            body = "открытых кругов нет"
+        send(state, f"📒 Открытые круги:\n{body}\n\nЗакрыто кругов: {len(state.get('closed', []))}, "
+                    f"итого: {rub(state.get('realized', 0)) if state.get('realized', 0) >= 0 else '−' + rub(-state['realized'])}")
+
+    # ---- напоминание закрыть круг: цена в банке обновилась (в котировке уже более свежая стоимость пая)
+    if now.hour >= 10:
+        for r in rounds:
+            if r.get("reminded") or not c.get("expected") or c["expected"] <= r["date"]:
+                continue
+            if r["side"] == "long":
+                gain = r["qty"] * (c["bid"] - r["price"])
+                word, color, act = "ПРОДАТЬ", "sell", f"продать {r['qty']} шт."
+            else:
+                gain = r["qty"] * (r["price"] - c["ask"])
+                word, color, act = "ОТКУПИТЬ", "buy", f"откупить {r['qty']} шт."
+            gtxt = rub(gain) if gain >= 0 else "−" + rub(-gain)
+            send_signal(state, c, now, f"Закрыть круг: {act}", notes=[f"закрыть круг: {act}, ожидаемо {gtxt}",
+                                                                      "проверь, что цена в приложении обновилась"],
+                        word=word, color=color, sub=f"закрыть круг · {gtxt}")
+            r["reminded"] = True
+
+    # ---- утреннее напоминание прислать цены
+    if now.weekday() < 5 and (9 * 60 + 30) <= now.hour * 60 + now.minute < 12 * 60 \
+            and state.get("remind_date") != today and c["q_kind"] != "user":
+        send(state, "☀️ Пришли цены пая из приложения Совкомбанка, например: «купить по 154,83 продать по 151,78». "
+                    "Так расчёт на сегодня будет точным.")
+        state["remind_date"] = today
 
     # ---- сигнал
     last, last_at = state.get("signal", "none"), state.get("signal_at")
     hours = (now - datetime.fromisoformat(last_at)).total_seconds() / 3600 if last_at else 1e9
     signal_sent = False
-    if c["signal"] != "none" and (c["signal"] != last or hours >= REPEAT_HOURS or asked):
+    # антидребезг: во время торгов новый сигнал — только если держится 2 проверки подряд
+    pend = state.get("pending") or {}
+    pend = {"signal": c["signal"], "n": pend.get("n", 0) + 1 if pend.get("signal") == c["signal"] else 1}
+    state["pending"] = pend
+    steady = (not in_session(now)) or pend["n"] >= 2 or asked
+    if c["signal"] != "none" and steady and (c["signal"] != last or hours >= REPEAT_HOURS or asked):
         send_signal(state, c, now)
         state["signal_at"] = now.isoformat()
         signal_sent = True
     elif c["signal"] == "none" and last != "none":
         send_signal(state, c, now, f"⬜ <b>ДЕРЖАТЬ</b>: сигнал «{'Покупать' if last == 'buy' else 'Продавать'}» больше не действует · {thr_txt()}.\n\n{msg_body(c, now)}")
-    state["signal"] = c["signal"]
+    if c["signal"] == "none" or steady:
+        state["signal"] = c["signal"]
 
     # ---- сводка
-    today = now.date().isoformat()
     due = now.hour >= SUMMARY_HOUR and state.get("summary_date") != today
     if (MODE == "summary" or asked or due) and not (signal_sent and not due):
-        send_signal(state, c, now, msg_summary(c, now))
+        send_signal(state, c, now, msg_summary(c, now), notes=[acc_note] if acc_note else None)
     if due:
         state["summary_date"] = today
 

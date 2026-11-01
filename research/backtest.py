@@ -95,6 +95,9 @@ def main():
     idx = {k: history("index", k, frm, till) for k in ("IMOEX", "MCFTRR")}
     for k in idx:
         print(f"  {k}: {len(idx[k])} дней истории")
+    from datetime import datetime as _dt
+    sl = B.load_dividends(list(px), {}, _dt.now(B.MSK))
+    print("smart-lab дивиденды:", {t: len(v) for t, v in sl.items()})
     divs = {t: dividends(t) for t in px}
     trade_days = sorted(idx["IMOEX"])
 
@@ -116,6 +119,14 @@ def main():
             return None
         return r
 
+    def r_share_sl(t, p, d):
+        a, b = last_on_or_before(px[t], p), last_on_or_before(px[t], d)
+        if not (B.ok(a) and B.ok(b)) or not px[t] or min(px[t]) > p:
+            return None
+        div = sum(v for t1, v in sl.get(t, []) if p <= t1 < d)
+        r = (b + div) / a - 1
+        return None if abs(r) > 0.20 else r
+
     def r_idx(k, p, d):
         a, b = last_on_or_before(idx[k], p), last_on_or_before(idx[k], d)
         return b / a - 1 if B.ok(a) and B.ok(b) else None
@@ -128,6 +139,7 @@ def main():
         "G = F + гэпы вниз сильнее индекса на 3%+ считаем дивидендом": lambda p, d: B.fund_move(
             weights, lambda t: (lambda r, ri: None if r is None or (ri is not None and r - ri < -0.03) else r)(
                 r_share(t, p, d, False, True), r_idx("MCFTRR", p, d)), r_idx("MCFTRR", p, d))[0],
+        "H = F + дивиденды smart-lab (как в боте теперь)": lambda p, d: B.fund_move(weights, lambda t: r_share_sl(t, p, d), r_idx("MCFTRR", p, d))[0],
         "D только IMOEX": lambda p, d: r_idx("IMOEX", p, d),
         "E только MCFTRR": lambda p, d: r_idx("MCFTRR", p, d),
     }
