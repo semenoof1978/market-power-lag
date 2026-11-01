@@ -177,7 +177,7 @@ def parse_weights(text):
 
 def load_fund():
     try:
-        text = page_text(http_get(UK_URL))
+        text = page_text(http_get(UK_URL, timeout=45, tries=4))
     except Exception as e:  # noqa: BLE001
         raise SourceError("сайт УК", f"нет связи ({type(e).__name__})")
     navs = parse_navs(text)
@@ -247,9 +247,10 @@ def fund_move(weights, ret_of, r_idx):
     return move, missing
 
 
-def calculate(now, quote):
-    """quote — котировка от пользователя: {"price", "nav", "date"} или {"price"} (только что прислана) или None."""
-    navs, weights, w_date, w_src = load_fund()
+def calculate(now, quote, fund):
+    """quote — котировка от пользователя: {"price", "nav", "date"} или {"price"} (только что прислана) или None.
+    fund — (navs, weights, w_date, w_src) с сайта УК или из запаса."""
+    navs, weights, w_date, w_src = fund
     tickers = [t for t, _, _ in weights]
     d0, nav0 = navs[0]
     today = now.date().isoformat()
@@ -355,10 +356,10 @@ def msg_signal(c, now):
 
 
 def msg_summary(c, now):
-    state = {"buy": "сигнал «Покупать»", "sell": "сигнал «Продавать»", "none": "сигнала нет"}[c["signal"]]
+    state = {"buy": "🟩 ПОКУПАТЬ", "sell": "🟥 ПРОДАВАТЬ", "none": "⬜ ДЕРЖАТЬ"}[c["signal"]]
     tip = "" if c["q_kind"] == "user" else "\n\nДля точного расчёта пришли котировку из приложения, например: котировка 154,83"
     return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state} (порог {str(THRESHOLD * 100).replace('.', ',')}%)\n\n"
-            f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{tip}")
+            f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{c.get('fund_note', '')}{tip}")
 
 
 # ---------------------------------------------------------------- signal card (picture)
@@ -371,8 +372,11 @@ def signal_card(c, now):
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         return None
-    buy = c["signal"] == "buy"
-    bg, fg, soft = ((30, 140, 80), (255, 255, 255), (214, 240, 224)) if buy else ((196, 52, 44), (255, 255, 255), (250, 222, 219))
+    sig = c["signal"]
+    buy = sig == "buy"
+    bg, fg, soft = {"buy": ((30, 140, 80), (255, 255, 255), (214, 240, 224)),
+                    "sell": ((196, 52, 44), (255, 255, 255), (250, 222, 219)),
+                    "none": ((72, 84, 104), (255, 255, 255), (214, 222, 235))}[sig]
     W, H = 1080, 640
     img = Image.new("RGB", (W, H), bg)
     d = ImageDraw.Draw(img)
@@ -384,15 +388,19 @@ def signal_card(c, now):
         return ImageFont.load_default()
 
     big, mid, small = font("DejaVuSans-Bold.ttf", 150), font("DejaVuSans-Bold.ttf", 52), font("DejaVuSans.ttf", 38)
-    word = "ПОКУПАТЬ" if buy else "ПРОДАВАТЬ"
+    word = {"buy": "ПОКУПАТЬ", "sell": "ПРОДАВАТЬ", "none": "ДЕРЖАТЬ"}[sig]
     while d.textlength(word, font=big) > W - 100 and big.size > 60:
         big = font("DejaVuSans-Bold.ttf", big.size - 10)
     d.text((W / 2, 150), word, font=big, fill=fg, anchor="mm")
-    edge = c["edge_buy"] if buy else c["edge_sell"]
-    d.text((W / 2, 275), f"выгода {pct(edge)}", font=mid, fill=fg, anchor="mm")
+    if sig == "none":
+        sub = f"покупка {pct(c['edge_buy'])} · выход {pct(c['edge_sell'])}"
+        d.text((W / 2, 275), sub, font=font("DejaVuSans-Bold.ttf", 44), fill=fg, anchor="mm")
+    else:
+        edge = c["edge_buy"] if buy else c["edge_sell"]
+        d.text((W / 2, 275), f"выгода {pct(edge)}", font=mid, fill=fg, anchor="mm")
     d.line((80, 345, W - 80, 345), fill=soft, width=3)
     rows = [("Расчётная стоимость пая", rub(c["calc"])),
-            (("Котировка «Продают по»", rub(c["ask"])) if buy else ("Продать сейчас ≈", rub(c["bid"]))),
+            (("Продать сейчас ≈", rub(c["bid"])) if sig == "sell" else ("Котировка «Продают по»", rub(c["ask"]))),
             (f"Фактическая (сайт УК, {ru_date(c['d0'])[:5]})", rub(c["nav0"]))]
     y = 395
     for label, val in rows:
@@ -433,8 +441,8 @@ def send(state, text):
     print("SENT:", text.split("\n")[0])
 
 
-def send_signal(state, c, now):
-    text = msg_signal(c, now)
+def send_signal(state, c, now, text=None):
+    text = text or msg_signal(c, now)
     png = signal_card(c, now)
     if png:
         try:
@@ -533,8 +541,23 @@ def main():
     quote = {"price": inc["quote"]} if inc["quote"] else state.get("quote")
 
     # ---- расчёт и оповещения о связи
+    fund_note = ""
     try:
-        c = calculate(now, quote)
+        try:
+            fund = load_fund()
+            state["fund_cache"] = {"at": now.isoformat(), "fund": fund}
+        except SourceError as e:
+            fc = state.get("fund_cache")
+            age = (now - datetime.fromisoformat(fc["at"])).total_seconds() / 3600 if fc else 1e9
+            if age > 24:
+                raise
+            print("UK site failed, using cache:", e)
+            fund = [fc["fund"][0], [tuple(x) for x in fc["fund"][1]], fc["fund"][2], fc["fund"][3]]
+            fund[0] = [tuple(x) for x in fund[0]]
+            fund_note = (f"\nСайт УК сейчас не ответил, стоимость пая из проверки "
+                         f"{datetime.fromisoformat(fc['at']).strftime('%d.%m %H:%M')}.")
+        c = calculate(now, quote, tuple(fund))
+        c["fund_note"] = fund_note
     except SourceError as e:
         fails = state.get("fails", 0) + 1
         state["fails"] = fails
@@ -542,7 +565,7 @@ def main():
         print("ERROR:", e)
         if fails == FAILS_TO_ALERT or MODE == "summary" or asked or inc["quote"]:
             send(state, f"⚠️ <b>Нет связи</b>: {e.source} — {e.detail}.\n"
-                        f"Не получается уже {fails} проверки подряд. Сигналы не приходят, пока связь не вернётся. "
+                        f"Неудачных проверок подряд: {fails}. Сигналы не приходят, пока связь не вернётся. "
                         f"Сообщу, когда восстановится.")
             state["alerted"] = True
         elif fails > FAILS_TO_ALERT and fails % 6 == 0:
@@ -586,14 +609,14 @@ def main():
         state["signal_at"] = now.isoformat()
         signal_sent = True
     elif c["signal"] == "none" and last != "none":
-        send(state, f"⚪ Сигнал «{'Покупать' if last == 'buy' else 'Продавать'}» больше не действует.\n\n{msg_body(c, now)}")
+        send_signal(state, c, now, f"⬜ <b>ДЕРЖАТЬ</b>: сигнал «{'Покупать' if last == 'buy' else 'Продавать'}» больше не действует.\n\n{msg_body(c, now)}")
     state["signal"] = c["signal"]
 
     # ---- сводка
     today = now.date().isoformat()
     due = now.hour >= SUMMARY_HOUR and state.get("summary_date") != today
     if (MODE == "summary" or asked or due) and not (signal_sent and not due):
-        send(state, msg_summary(c, now))
+        send_signal(state, c, now, msg_summary(c, now))
     if due:
         state["summary_date"] = today
 
