@@ -44,8 +44,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode || 'summary' }}
-          THRESHOLD: '3'
-          SPREAD: '0.5'
+          THRESHOLD: '1.5'
+          SPREAD: '1'
           SUMMARY_HOUR: '19'
 
       - name: Keep schedule alive
