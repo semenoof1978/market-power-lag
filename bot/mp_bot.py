@@ -440,7 +440,7 @@ def msg_signal(c, now):
 def msg_summary(c, now):
     state = {"buy": "🟩 ПОКУПАТЬ", "sell": "🟥 ПРОДАВАТЬ", "none": "⬜ ДЕРЖАТЬ"}[c["signal"]]
     tip = "" if c["q_kind"] in ("user", "exchange") else "\n\nДля точного расчёта пришли цены из приложения: «купить по 154,83» и «продать по 153,29»"
-    return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state} (порог {str(THRESHOLD * 100).replace('.', ',')}%)\n\n"
+    return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state}\n\n"
             f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{c.get('fund_note', '')}{tip}")
 
 
@@ -530,13 +530,14 @@ def send_signal(state, c, now, text=None):
     png = signal_card(c, now)
     if png:
         try:
-            cap, rest = text, ""
-            if len(text) > 1000:                       # подпись к фото — до 1024 символов, режем по строке
-                cut = text.rfind("\n", 0, 1000)
-                cap, rest = text[:cut], text[cut + 1:]
-            tg_photo(state["chat_id"], png, cap)
-            if rest.strip():
-                send(state, rest)
+            # коротко: карточка + одна строка заголовка (и предупреждение, если есть)
+            cap = text.split("\n")[0]
+            notes = []
+            if c.get("missing"):
+                notes.append("⚠️ нет цен: " + ", ".join(c["missing"]))
+            if c.get("fund_note"):
+                notes.append("⚠️ сайт УК не ответил, стоимость пая из прошлой проверки")
+            tg_photo(state["chat_id"], png, "\n".join([cap] + notes))
             print("card sent")
             return
         except Exception as e:  # noqa: BLE001
@@ -703,9 +704,8 @@ def main():
         parts = [f"купить по {rub(qq['buy'])}" if qq.get("buy") else None,
                  f"продать по {rub(qq['sell'])}" if qq.get("sell") else None]
         more = "" if qq.get("buy") and qq.get("sell") else (
-            "\nПришли и вторую цену («" + ("продать" if qq.get("buy") else "купить") + " по …»), тогда спред будет точным.")
-        send(state, f"✅ Принял: {', '.join(p for p in parts if p)}. Стоимость пая в ценах {rub(qq['nav'])} "
-                    f"за {ru_date(qq['date'])}, спред ±{fmt_pct(qq['spread'])}. Считаю от них, пока Совкомбанк не обновит цены.{more}")
+            ". Пришли и «" + ("продать" if qq.get("buy") else "купить") + " по …»")
+        send(state, f"✅ Цены приняты: {', '.join(p for p in parts if p)}{more}")
         asked = True
     elif c["quote_status"] == "expired":
         state.pop("quote", None)
