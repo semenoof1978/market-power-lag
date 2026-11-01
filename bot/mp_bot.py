@@ -403,7 +403,7 @@ def main():
         state["fails"] = fails
         state["last_error"] = str(e)
         print("ERROR:", e)
-        if fails == FAILS_TO_ALERT or (MODE == "summary" and fails >= 1):
+        if fails == FAILS_TO_ALERT or MODE == "summary" or asked:
             send(state, f"⚠️ <b>Нет связи</b>: {e.source} — {e.detail}.\n"
                         f"Не получается уже {fails} проверки подряд. Сигналы не приходят, пока связь не вернётся. "
                         f"Сообщу, когда восстановится.")
