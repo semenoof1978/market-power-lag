@@ -122,6 +122,11 @@ def in_session(now):
     return 9 * 60 + 50 <= m < 19 * 60 + 15
 
 
+def money(x):
+    """Сумма со знаком, 0 — тоже число (rub() для нуля ставит прочерк)."""
+    return ("+" if x > 0 else "−" if x < 0 else "") + f"{abs(x):,.2f}".replace(",", " ").replace(".", ",") + " ₽"
+
+
 def thr_txt():
     return f"порог {THRESHOLD * 100:g}%".replace(".", ",")
 
@@ -884,8 +889,8 @@ def main():
             state.setdefault("closed", []).append({"at": now.isoformat(), "profit": round(profit, 2),
                                                     "pct": round(profit / closed_cost, 5)})
             state["closed"] = state["closed"][-50:]
-            lines.append(f"✅ Круг закрыт: {rub(profit) if profit >= 0 else '−' + rub(-profit)} "
-                         f"({pct(profit / closed_cost)}). Итого по всем кругам: {rub(state['realized'])}.")
+            lines.append(f"✅ Круг закрыт: {money(profit)} ({pct(profit / closed_cost)}). "
+                         f"Итого по всем кругам: {money(state['realized'])}.")
         if remaining > 0:
             rounds.append({"side": "long" if side == "buy" else "short", "qty": remaining, "price": price,
                            "date": c["expected"], "at": now.isoformat(), "reminded": False})
@@ -900,7 +905,7 @@ def main():
         else:
             body = "открытых кругов нет"
         send(state, f"📒 Открытые круги:\n{body}\n\nЗакрыто кругов: {len(state.get('closed', []))}, "
-                    f"итого: {rub(state.get('realized', 0)) if state.get('realized', 0) >= 0 else '−' + rub(-state['realized'])}")
+                    f"итого: {money(state.get('realized', 0))}")
 
     # ---- напоминание закрыть круг: цена в банке обновилась (в котировке уже более свежая стоимость пая)
     if now.hour >= 10:
@@ -913,7 +918,7 @@ def main():
             else:
                 gain = r["qty"] * (r["price"] - c["ask"])
                 word, color, act = "ОТКУПИТЬ", "buy", f"откупить {r['qty']} шт."
-            gtxt = rub(gain) if gain >= 0 else "−" + rub(-gain)
+            gtxt = money(gain)
             send_signal(state, c, now, f"Закрыть круг: {act}", notes=[f"закрыть круг: {act}, ожидаемо {gtxt}",
                                                                       "проверь, что цена в приложении обновилась"],
                         word=word, color=color, sub=f"закрыть круг · {gtxt}")
