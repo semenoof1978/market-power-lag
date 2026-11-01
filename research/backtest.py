@@ -52,7 +52,10 @@ def history(kind, secid, frm, till):
 
 def dividends(secid):
     try:
-        j = B.iss_json(f"{B.ISS}/securities/{secid}/dividends.json?iss.meta=off")
+        raw = B.http_get(f"{B.ISS}/securities/{secid}/dividends.json?iss.meta=off")
+        if secid in ("SBER", "LKOH"):
+            print(f"  RAW dividends {secid}: {raw[:600]}")
+        j = json.loads(raw)
         return [(r["registryclosedate"], r["value"]) for r in B.iss_rows(j, "dividends")
                 if r.get("registryclosedate") and B.ok(r.get("value"))]
     except Exception as e:  # noqa: BLE001
@@ -103,12 +106,15 @@ def main():
     ex = {t: [(exdate(r), v) for r, v in divs[t]] for t in divs}
     print("Дивиденды в периоде:", sum(1 for t in ex for d, _ in ex[t] if d >= START))
 
-    def r_share(t, p, d, with_div):
+    def r_share(t, p, d, with_div, clip=False):
         a, b = last_on_or_before(px[t], p), last_on_or_before(px[t], d)
         if not (B.ok(a) and B.ok(b)) or not px[t] or min(px[t]) > p:
             return None
         div = sum(v for e, v in ex[t] if p < e <= d) if with_div else 0
-        return (b + div) / a - 1
+        r = (b + div) / a - 1
+        if clip and abs(r) > 0.20:      # сплит/консолидация или ошибка данных — берём как индекс
+            return None
+        return r
 
     def r_idx(k, p, d):
         a, b = last_on_or_before(idx[k], p), last_on_or_before(idx[k], d)
@@ -118,6 +124,7 @@ def main():
         "A топ-10 + IMOEX (как сейчас)": lambda p, d: B.fund_move(weights, lambda t: r_share(t, p, d, False), r_idx("IMOEX", p, d))[0],
         "B топ-10 + IMOEX + дивиденды": lambda p, d: B.fund_move(weights, lambda t: r_share(t, p, d, True), r_idx("IMOEX", p, d))[0],
         "C топ-10 + MCFTRR + дивиденды": lambda p, d: B.fund_move(weights, lambda t: r_share(t, p, d, True), r_idx("MCFTRR", p, d))[0],
+        "F топ-10 + MCFTRR + дивиденды + фильтр сплитов": lambda p, d: B.fund_move(weights, lambda t: r_share(t, p, d, True, True), r_idx("MCFTRR", p, d))[0],
         "D только IMOEX": lambda p, d: r_idx("IMOEX", p, d),
         "E только MCFTRR": lambda p, d: r_idx("MCFTRR", p, d),
     }
@@ -188,9 +195,10 @@ def main():
     print(f"\n=== 15 крупнейших ошибок модели A ===")
     for r in worst:
         evs = [f"{t} {v}" for t in ex for e, v in ex[t] if r["p"] < e <= r["d"]]
+        per = ", ".join(f"{t} {x*100:+.1f}%" for t in px for x in [r_share(t, r["p"], r["d"], False)] if x is not None and abs(x) > 0.03)
         print(f"  {r['p']}→{r['d']} факт {r['fact']*100:+6.2f}% модель A {r[name]*100:+6.2f}% "
               f"B {r['B топ-10 + IMOEX + дивиденды']*100:+6.2f}% E {(r['E только MCFTRR'] or 0)*100:+6.2f}% "
-              f"{'дивиденды: ' + ', '.join(evs) if evs else ''}")
+              f"{'дивиденды: ' + ', '.join(evs) if evs else ''} | бумаги >3%: {per}")
 
 
 if __name__ == "__main__":

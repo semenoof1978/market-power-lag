@@ -113,6 +113,15 @@ def rub(x):
     return f"{x:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
 
 
+def in_session(now):
+    """Идут ли торги акциями на Мосбирже (с запасом 15 минут на задержку данных).
+    Будни 06:50–23:50, выходные 09:50–19:00 (расписание с 14.09.2026)."""
+    m = now.hour * 60 + now.minute
+    if now.weekday() < 5:
+        return 6 * 60 + 50 <= m < 24 * 60          # 23:50 + 15 мин задержки ≈ до полуночи
+    return 9 * 60 + 50 <= m < 19 * 60 + 15
+
+
 def thr_txt():
     return f"порог {THRESHOLD * 100:g}%".replace(".", ",")
 
@@ -483,6 +492,8 @@ def signal_card(c, now, notes=()):
     while d.textlength(word, font=big) > W - 100 and big.size > 60:
         big = font("DejaVuSans-Bold.ttf", big.size - 10)
     d.text((W / 2, 150), word, font=big, fill=fg, anchor="mm")
+    tag = "ПРЕДВАРИТЕЛЬНО · идут торги" if in_session(now) else "ПОДТВЕРЖДЕНО · торги закрыты"
+    d.text((W / 2, 46), tag, font=font("DejaVuSans-Bold.ttf", 30), fill=soft, anchor="mm")
     if sig == "none":
         sub = f"покупка {pct(c['edge_buy'])} · выход {pct(c['edge_sell'])}"
         d.text((W / 2, 275), sub, font=font("DejaVuSans-Bold.ttf", 44), fill=fg, anchor="mm")
