@@ -171,8 +171,8 @@ def parse_weights(text):
     total = sum(w for _, _, w in res)
     if len(res) < 5 or not 35 <= total <= 100:
         return None
-    d = re.search(r"АКТУАЛЬНЫ ПО СОСТОЯНИЮ НА (\d{1,2} [А-ЯЁ]+ \d{4})", seg)
-    return res, (d.group(1).lower() if d else "?")
+    d = re.search(r"АКТУАЛЬНЫ\s+ПО\s+СОСТОЯНИЮ\s+НА\s+(\d{1,2}\s+[А-ЯЁ]+\s+\d{4}|\d{2}\.\d{2}\.\d{4})", up[a:])
+    return res, (re.sub(r"\s+", " ", d.group(1)).lower() if d else "дата не указана")
 
 
 def load_fund():
