@@ -496,7 +496,7 @@ def signal_card(c, now):
         d.text((80, y), label, font=small, fill=soft, anchor="lm")
         d.text((W - 80, y), val, font=font("DejaVuSans-Bold.ttf", 42), fill=fg, anchor="rm")
         y += 66
-    d.text((W / 2, H - 38), f"Маркет Пауэр · {thr_txt()} · {now.strftime('%d.%m %H:%M')} МСК", font=font("DejaVuSans.ttf", 30), fill=soft, anchor="mm")
+    d.text((W / 2, H - 38), f"Маркет Пауэр · {now.strftime('%d.%m %H:%M')} МСК", font=font("DejaVuSans.ttf", 30), fill=soft, anchor="mm")
     import io
     out = io.BytesIO()
     img.save(out, "PNG")
