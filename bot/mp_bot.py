@@ -110,6 +110,10 @@ def rub(x):
     return f"{x:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
 
 
+def fmt_pct(x):
+    return f"{x * 100:.2f}".replace(".", ",") + "%"
+
+
 def pct(x):
     s = f"{x * 100:+.2f}".replace(".", ",")
     return s + "%"
@@ -248,7 +252,8 @@ def fund_move(weights, ret_of, r_idx):
 
 
 def calculate(now, quote, fund):
-    """quote — котировка от пользователя: {"price", "nav", "date"} или {"price"} (только что прислана) или None.
+    """quote — цены от пользователя: сохранённые {"buy","sell","nav","date","spread"}
+    или только что присланные {"new": True, "buy", "sell", "prev"}; None — оценивать самому.
     fund — (navs, weights, w_date, w_src) с сайта УК или из запаса."""
     navs, weights, w_date, w_src = fund
     tickers = [t for t, _, _ in weights]
@@ -274,15 +279,27 @@ def calculate(now, quote, fund):
 
     # --- котировка пользователя: определить, за какую дату в ней стоимость пая
     quote_status = None
-    if quote and "date" not in quote:
-        q_nav = quote["price"] / (1 + SPREAD)
-        match = next((d for d, n in navs if abs(n - q_nav) / n < 0.0012), None)
-        if match:
-            q_d = match
-        else:
+    if quote and quote.get("new"):
+        b, sl, prev = quote.get("buy"), quote.get("sell"), quote.get("prev") or {}
+
+        def nav_of(b_, s_):
+            if b_ and s_:
+                return (b_ + s_) / 2
+            return b_ / (1 + SPREAD) if b_ else s_ / (1 - SPREAD)
+
+        def date_of(nav_):
+            match = next((d for d, n in navs if abs(n - nav_) / n < 0.0012), None)
+            if match:
+                return match
             later = [d for d in trading if d > d0]
-            q_d = later[0] if later else (trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0)
-        quote = {"price": quote["price"], "nav": round(q_nav, 4), "date": q_d}
+            return later[0] if later else (trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0)
+
+        q_d = date_of(nav_of(b, sl))
+        if prev.get("date") == q_d:          # вторая цена из прошлого сообщения того же дня
+            b, sl = b or prev.get("buy"), sl or prev.get("sell")
+        q_nav = nav_of(b, sl)
+        spr = (b - sl) / (b + sl) if b and sl else SPREAD
+        quote = {"buy": b, "sell": sl, "nav": round(q_nav, 4), "date": q_d, "spread": spr}
         quote_status = "new"
     expected = trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0
     if quote and quote_status != "new" and quote["date"] < expected:
@@ -297,8 +314,11 @@ def calculate(now, quote, fund):
     calc = base_nav * (1 + move_now) * fee(base_d, today)
 
     # --- котировка Совкомбанка
+    s_eff = quote["spread"] if quote else SPREAD
     if quote:
-        q_date, q_nav, q_kind, ask = quote["date"], quote["nav"], "user", quote["price"]
+        q_date, q_nav, q_kind = quote["date"], quote["nav"], "user"
+        ask = quote["buy"] or q_nav * (1 + s_eff)
+        bid = quote["sell"] or q_nav * (1 - s_eff)
     else:
         q_date = expected
         if q_date in nav_map:
@@ -308,11 +328,10 @@ def calculate(now, quote, fund):
             q_nav, q_kind = nav0 * (1 + mv) * fee(d0, q_date), "est"
         else:
             q_date, q_nav, q_kind = d0, nav0, "site"
-        ask = q_nav * (1 + SPREAD)
-    bid = q_nav * (1 - SPREAD)
+        ask, bid = q_nav * (1 + SPREAD), q_nav * (1 - SPREAD)
 
-    edge_buy = calc * (1 - SPREAD) / ask - 1      # купить сейчас, продать после обновления
-    edge_sell = bid / (calc * (1 + SPREAD)) - 1   # продать сейчас, откупить после обновления
+    edge_buy = calc * (1 - s_eff) / ask - 1      # купить сейчас, продать после обновления
+    edge_sell = bid / (calc * (1 + s_eff)) - 1   # продать сейчас, откупить после обновления
     signal = "buy" if edge_buy >= THRESHOLD else "sell" if edge_sell >= THRESHOLD else "none"
     return {
         "signal": signal, "calc": calc, "move": move_now, "missing": missing,
@@ -320,27 +339,32 @@ def calculate(now, quote, fund):
         "d0": d0, "nav0": nav0, "q_date": q_date, "q_nav": q_nav, "q_kind": q_kind,
         "ask": ask, "bid": bid, "edge_buy": edge_buy, "edge_sell": edge_sell,
         "upd": upd, "w_src": w_src, "w_date": w_date,
-        "quote": quote, "quote_status": quote_status,
+        "quote": quote, "quote_status": quote_status, "spread": s_eff,
     }
 
 
 # ---------------------------------------------------------------- messages
 def msg_body(c, now):
-    base = (f"от твоей котировки за {ru_date(c['base_d'])}" if c["base_src"] == "user"
+    base = (f"от твоих цен за {ru_date(c['base_d'])}" if c["base_src"] == "user"
             else f"к {ru_date(c['base_d'])}")
     if c["q_kind"] == "user":
-        q = f"<b>{rub(c['ask'])}</b> (прислал ты) → стоимость пая в ней {rub(c['q_nav'])} за {ru_date(c['q_date'])}"
+        qq = c["quote"]
+        b = f"<b>{rub(c['ask'])}</b>" if qq.get("buy") else f"≈ {rub(c['ask'])}"
+        sl = f"<b>{rub(c['bid'])}</b>" if qq.get("sell") else f"≈ {rub(c['bid'])}"
+        q = (f"купить по {b}, продать по {sl} (прислал ты)\n"
+             f"   стоимость пая в ценах {rub(c['q_nav'])} за {ru_date(c['q_date'])}")
     elif c["q_kind"] == "est":
-        q = f"≈ {rub(c['ask'])} (оценка бота, стоимость пая за {ru_date(c['q_date'])} на сайте УК ещё нет)"
+        q = (f"купить ≈ {rub(c['ask'])}, продать ≈ {rub(c['bid'])}\n"
+             f"   оценка бота: стоимости пая за {ru_date(c['q_date'])} на сайте УК ещё нет")
     else:
-        q = f"≈ {rub(c['ask'])} (стоимость пая за {ru_date(c['q_date'])} + спред)"
+        q = (f"купить ≈ {rub(c['ask'])}, продать ≈ {rub(c['bid'])}\n"
+             f"   стоимость пая за {ru_date(c['q_date'])} ± спред")
     lines = [
         f"Расчётная стоимость пая: <b>{rub(c['calc'])}</b>",
         f"   по ценам Мосбиржи на {(c['upd'] or now.strftime('%H:%M'))[:5]} МСК, {pct(c['move'])} {base}",
         f"Фактическая стоимость пая: <b>{rub(c['nav0'])}</b> (сайт УК, {ru_date(c['d0'])})",
-        f"Котировка «Продают по»: {q}",
-        f"   продать сейчас ≈ {rub(c['bid'])}",
-        f"Выгода с учётом спреда {str(SPREAD * 100).replace('.', ',')}%: покупка {pct(c['edge_buy'])}, выход {pct(c['edge_sell'])}",
+        f"Цены в Совкомбанке: {q}",
+        f"Выгода с учётом спреда ±{fmt_pct(c['spread'])}: покупка {pct(c['edge_buy'])}, выход {pct(c['edge_sell'])}",
     ]
     if c["missing"]:
         lines.append("Нет цен по: " + ", ".join(c["missing"]) + " — взял их как индекс.")
@@ -357,7 +381,7 @@ def msg_signal(c, now):
 
 def msg_summary(c, now):
     state = {"buy": "🟩 ПОКУПАТЬ", "sell": "🟥 ПРОДАВАТЬ", "none": "⬜ ДЕРЖАТЬ"}[c["signal"]]
-    tip = "" if c["q_kind"] == "user" else "\n\nДля точного расчёта пришли котировку из приложения, например: котировка 154,83"
+    tip = "" if c["q_kind"] == "user" else "\n\nДля точного расчёта пришли цены из приложения: «купить по 154,83» и «продать по 153,29»"
     return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state} (порог {str(THRESHOLD * 100).replace('.', ',')}%)\n\n"
             f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{c.get('fund_note', '')}{tip}")
 
@@ -400,7 +424,7 @@ def signal_card(c, now):
         d.text((W / 2, 275), f"выгода {pct(edge)}", font=mid, fill=fg, anchor="mm")
     d.line((80, 345, W - 80, 345), fill=soft, width=3)
     rows = [("Расчётная стоимость пая", rub(c["calc"])),
-            (("Продать сейчас ≈", rub(c["bid"])) if sig == "sell" else ("Котировка «Продают по»", rub(c["ask"]))),
+            (("Продать по", rub(c["bid"])) if sig == "sell" else ("Купить по", rub(c["ask"]))),
             (f"Фактическая (сайт УК, {ru_date(c['d0'])[:5]})", rub(c["nav0"]))]
     y = 395
     for label, val in rows:
@@ -454,12 +478,12 @@ def send_signal(state, c, now, text=None):
     send(state, text)
 
 
-QUOTE_RE = re.compile(r"(\d{2,4}(?:[.,]\d{1,2})?)")
+PRICE_RE = r"(\d{2,4}(?:[.,]\d{1,2})?)"
 
 
 def incoming(state):
-    """chat_id из первого сообщения, «статус», «котировка 154,83», «котировка авто»."""
-    res = {"asked": False, "quote": None, "quote_off": False}
+    """chat_id из первого сообщения, «статус», «купить по 154,83», «продать по 153,29», «сброс»."""
+    res = {"asked": False, "buy": None, "sell": None, "quote_off": False}
     try:
         upd = tg("getUpdates", offset=state.get("tg_offset", 0), timeout=0)
     except Exception as e:  # noqa: BLE001
@@ -479,14 +503,16 @@ def incoming(state):
         text = (m.get("text") or "").lower().strip()
         if re.search(r"статус|status|сейчас", text):
             res["asked"] = True
-        if "котиров" in text or re.fullmatch(r"\d{2,4}(?:[.,]\d{1,2})?\s*(₽|р|руб\.?)?", text):
-            if re.search(r"авто|сброс|удал", text):
-                res["quote_off"], res["quote"] = True, None
-                continue
-            m2 = QUOTE_RE.search(text)
-            v = num(m2.group(1)) if m2 else float("nan")
-            if 20 < v < 2000:
-                res["quote"], res["quote_off"] = v, False
+        if re.search(r"^(сброс|цены авто|котировка авто|авто)\b", text):
+            res.update(quote_off=True, buy=None, sell=None)
+            continue
+        for key, pat in (("buy", r"(?:купить|покупка|продают)\s*(?:по|за)?\s*:?\s*" + PRICE_RE),
+                         ("sell", r"(?:продать|продажа|покупают)\s*(?:по|за)?\s*:?\s*" + PRICE_RE),
+                         ("buy", r"котировк\w*\s*:?\s*" + PRICE_RE)):
+            for m2 in re.finditer(pat, text):
+                v = num(m2.group(1))
+                if 20 < v < 2000:
+                    res[key], res["quote_off"] = v, False
     return res
 
 
@@ -526,19 +552,34 @@ def main():
                     f"сводка около {SUMMARY_HOUR}:00.\n"
                     "Команды (ответ — при ближайшей проверке):\n"
                     "• «статус» — текущий расчёт\n"
-                    "• «котировка 154,83» — цена «Продают по» из приложения, считаю от неё\n"
-                    "• «котировка авто» — снова оценивать котировку самому")
+                    "• «купить по 154,83» — цена покупки пая в приложении\n"
+                    "• «продать по 153,29» — цена продажи пая в приложении\n"
+                    "• «сброс» — снова оценивать цены самому")
     elif not state.get("v2_notice"):
         send(state, "🆕 Обновление бота:\n"
                     "• «котировка 154,83» — пришли цену «Продают по» из приложения, буду считать от неё\n"
                     "• «котировка авто» — снова оценивать котировку самому\n"
                     "• сигналы теперь приходят картинкой: зелёной «ПОКУПАТЬ» или красной «ПРОДАВАТЬ»\n"
                     "Ответ на команды — при ближайшей ежечасной проверке.")
-    state["v2_notice"] = True
+    elif not state.get("v3_notice"):
+        send(state, "🆕 Вместо «котировка» теперь две команды:\n"
+                    "• «купить по 154,83» — цена покупки пая в приложении\n"
+                    "• «продать по 153,29» — цена продажи\n"
+                    "Можно одной строкой или по очереди. С обеими ценами бот знает реальный спред.\n"
+                    "• «сброс» — снова оценивать цены самому")
+    state["v2_notice"] = state["v3_notice"] = True
     if inc["quote_off"]:
         state.pop("quote", None)
-        send(state, "Ок, котировку снова оцениваю сам.")
-    quote = {"price": inc["quote"]} if inc["quote"] else state.get("quote")
+        send(state, "Ок, цены снова оцениваю сам.")
+    stored = state.get("quote")
+    if stored and "price" in stored:                 # старый формат «котировка»
+        stored = ({"new": True, "buy": stored["price"]} if "date" not in stored else
+                  {"buy": stored["price"], "sell": None, "nav": stored["nav"], "date": stored["date"], "spread": SPREAD})
+    if stored and stored.get("new") and not (inc["buy"] or inc["sell"]):
+        inc["buy"], inc["sell"] = stored.get("buy"), stored.get("sell")   # не обработанные из-за сбоя
+        stored = None
+    got_prices = bool(inc["buy"] or inc["sell"])
+    quote = ({"new": True, "buy": inc["buy"], "sell": inc["sell"], "prev": stored} if got_prices else stored)
 
     # ---- расчёт и оповещения о связи
     fund_note = ""
@@ -563,15 +604,15 @@ def main():
         state["fails"] = fails
         state["last_error"] = str(e)
         print("ERROR:", e)
-        if fails == FAILS_TO_ALERT or MODE == "summary" or asked or inc["quote"]:
+        if fails == FAILS_TO_ALERT or MODE == "summary" or asked or got_prices:
             send(state, f"⚠️ <b>Нет связи</b>: {e.source} — {e.detail}.\n"
                         f"Неудачных проверок подряд: {fails}. Сигналы не приходят, пока связь не вернётся. "
                         f"Сообщу, когда восстановится.")
             state["alerted"] = True
         elif fails > FAILS_TO_ALERT and fails % 6 == 0:
             send(state, f"⚠️ Связи всё ещё нет: {e.source} — {e.detail}. Проверок без данных подряд: {fails}.")
-        if inc["quote"]:
-            state["quote"] = {"price": inc["quote"]}
+        if got_prices:
+            state["quote"] = {"new": True, "buy": inc["buy"], "sell": inc["sell"]}
         save_state(state)
         return 0
     except Exception as e:  # noqa: BLE001
@@ -589,13 +630,18 @@ def main():
     # ---- котировка пользователя
     if c["quote_status"] == "new":
         state["quote"] = c["quote"]
-        send(state, f"✅ Принял котировку {rub(c['quote']['price'])}. Стоимость пая в ней {rub(c['quote']['nav'])} "
-                    f"за {ru_date(c['quote']['date'])}. Считаю от неё, пока Совкомбанк не обновит цену.")
+        qq = c["quote"]
+        parts = [f"купить по {rub(qq['buy'])}" if qq.get("buy") else None,
+                 f"продать по {rub(qq['sell'])}" if qq.get("sell") else None]
+        more = "" if qq.get("buy") and qq.get("sell") else (
+            "\nПришли и вторую цену («" + ("продать" if qq.get("buy") else "купить") + " по …»), тогда спред будет точным.")
+        send(state, f"✅ Принял: {', '.join(p for p in parts if p)}. Стоимость пая в ценах {rub(qq['nav'])} "
+                    f"за {ru_date(qq['date'])}, спред ±{fmt_pct(qq['spread'])}. Считаю от них, пока Совкомбанк не обновит цены.{more}")
         asked = True
     elif c["quote_status"] == "expired":
         state.pop("quote", None)
-        send(state, "ℹ️ Твоя котировка устарела: прошёл новый торговый день. Снова оцениваю её сам. "
-                    "Пришли новую, например: котировка 154,83")
+        send(state, "ℹ️ Твои цены устарели: прошёл новый торговый день. Снова оцениваю их сам. "
+                    "Пришли новые: «купить по …» и «продать по …»")
     elif c["quote"]:
         state["quote"] = c["quote"]
     print(json.dumps({k: v for k, v in c.items() if k != "missing"}, ensure_ascii=False, default=str))
