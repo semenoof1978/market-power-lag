@@ -1,11 +1,8 @@
 #!/bin/bash
-# поиск рабочего источника дивидендов на Мосбирже
-for u in \
- "https://iss.moex.com/iss/securities/SBER/dividends.json?iss.meta=off&iss.only=dividends" \
- "https://iss.moex.com/iss/securities/SBER/dividends.json" \
- "https://iss.moex.com/iss/cci/corp-actions/dividends.json?iss.meta=off&secid=SBER" \
- "https://iss.moex.com/iss/cci/corp-actions.json?iss.meta=off" \
- "https://iss.moex.com/iss/securities/SBER/dividends" ; do
+# альтернативные источники дивидендов
+UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+for u in "https://smart-lab.ru/q/SBER/dividend/" "https://www.dohod.ru/ik/analytics/dividend/sber" ; do
   echo "### $u"
-  curl -sS -m 30 "$u" | tr -s ' \n' ' ' | cut -c1-700; echo
+  curl -sS -m 30 -A "$UA" -o p.html -w "HTTP %{http_code} size %{size_download}\n" "$u"
+  grep -oE ".{0,80}(2024|2025|2026)-?[0-9.]{0,6}.{0,120}(руб|₽|дивиденд).{0,40}" p.html | head -5
 done

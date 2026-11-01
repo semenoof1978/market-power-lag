@@ -125,6 +125,9 @@ def main():
         "B топ-10 + IMOEX + дивиденды": lambda p, d: B.fund_move(weights, lambda t: r_share(t, p, d, True), r_idx("IMOEX", p, d))[0],
         "C топ-10 + MCFTRR + дивиденды": lambda p, d: B.fund_move(weights, lambda t: r_share(t, p, d, True), r_idx("MCFTRR", p, d))[0],
         "F топ-10 + MCFTRR + дивиденды + фильтр сплитов": lambda p, d: B.fund_move(weights, lambda t: r_share(t, p, d, True, True), r_idx("MCFTRR", p, d))[0],
+        "G = F + гэпы вниз сильнее индекса на 3%+ считаем дивидендом": lambda p, d: B.fund_move(
+            weights, lambda t: (lambda r, ri: None if r is None or (ri is not None and r - ri < -0.03) else r)(
+                r_share(t, p, d, False, True), r_idx("MCFTRR", p, d)), r_idx("MCFTRR", p, d))[0],
         "D только IMOEX": lambda p, d: r_idx("IMOEX", p, d),
         "E только MCFTRR": lambda p, d: r_idx("MCFTRR", p, d),
     }
