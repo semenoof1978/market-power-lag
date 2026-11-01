@@ -231,7 +231,13 @@ def load_history(tickers, frm, till):
     idx = {r["TRADEDATE"]: r["CLOSE"] for r in iss_rows(j, "history") if ok(r.get("CLOSE"))}
     if not idx:
         raise SourceError("Мосбиржа", "пустая история индекса")
-    return hist, idx
+    try:
+        j = iss_json(f"{ISS}/history/engines/stock/markets/index/securities/MCFTRR.json"
+                     f"?iss.meta=off&iss.only=history&from={frm}&till={till}&history.columns=TRADEDATE,CLOSE")
+        tr = {r["TRADEDATE"]: r["CLOSE"] for r in iss_rows(j, "history") if ok(r.get("CLOSE"))}
+    except SourceError:
+        tr = {}
+    return hist, idx, tr
 
 
 def load_market(tickers):
@@ -245,12 +251,13 @@ def load_market(tickers):
         cur[r["SECID"]] = v
         if r.get("UPDATETIME") and (upd is None or r["UPDATETIME"] > upd):
             upd = r["UPDATETIME"]
-    j = iss_json(f"{ISS}/engines/stock/markets/index/securities.json?iss.meta=off&iss.only=marketdata&securities=IMOEX")
-    r = (iss_rows(j, "marketdata") or [{}])[0]
-    idx = next((x for x in (r.get("CURRENTVALUE"), r.get("LASTVALUE")) if ok(x)), None)
+    j = iss_json(f"{ISS}/engines/stock/markets/index/securities.json?iss.meta=off&iss.only=marketdata&securities=IMOEX,MCFTRR")
+    vals = {r.get("SECID"): next((x for x in (r.get("CURRENTVALUE"), r.get("LASTVALUE")) if ok(x)), None)
+            for r in iss_rows(j, "marketdata")}
+    idx = vals.get("IMOEX")
     if not ok(idx):
         raise SourceError("Мосбиржа", "нет текущего значения индекса")
-    return cur, idx, upd
+    return cur, idx, upd, vals.get("MCFTRR")
 
 
 FUND_ISIN = "RU000A107G30"
@@ -320,19 +327,29 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD):
     d0, nav0 = navs[0]
     today = now.date().isoformat()
     frm = (date.fromisoformat(d0) - timedelta(days=12)).isoformat()
-    hist, idx_hist = load_history(tickers, frm, today)
-    cur, idx_now, upd = load_market(tickers)
+    hist, idx_hist, tr_hist = load_history(tickers, frm, today)
+    cur, idx_now, upd, tr_now = load_market(tickers)
     if d0 not in idx_hist:
         raise SourceError("Мосбиржа", f"нет закрытия индекса за {ru_date(d0)}")
     trading = sorted(d for d in idx_hist if d < today)
     nav_map = dict(navs)
 
-    def move_between(a, price_b, idx_b):
-        """Изменение пая от закрытия дня a до цен price_b(t) и индекса idx_b."""
+    def rest_ret(a, idx_b, tr_b):
+        """Остальная часть портфеля: MCFTRR (полная доходность, учитывает дивиденды), иначе IMOEX.
+        По бэктесту 2024–2026 так точнее."""
+        if ok(tr_b) and ok(tr_hist.get(a)):
+            return tr_b / tr_hist[a] - 1
+        return idx_b / idx_hist[a] - 1
+
+    def move_between(a, price_b, idx_b, tr_b=None):
+        """Изменение пая от закрытия дня a до цен price_b(t) и индексов на момент b."""
         def r(t):
             pa, pb = hist.get(t, {}).get(a), price_b(t)
-            return pb / pa - 1 if ok(pa) and ok(pb) else None
-        return fund_move(weights, r, idx_b / idx_hist[a] - 1)
+            if not (ok(pa) and ok(pb)):
+                return None
+            x = pb / pa - 1
+            return None if abs(x) > 0.20 else x      # сплит/консолидация (как у T и TRNFP) — берём как индекс
+        return fund_move(weights, r, rest_ret(a, idx_b, tr_b))
 
     def fee(a, b):
         return 1 - FUND_FEE * (date.fromisoformat(b) - date.fromisoformat(a)).days / 365
@@ -376,7 +393,7 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD):
         base_d, base_nav, base_src = quote["date"], quote["nav"], q_src
     else:
         base_d, base_nav, base_src = d0, nav0, "site"
-    move_now, missing = move_between(base_d, lambda t: cur.get(t), idx_now)
+    move_now, missing = move_between(base_d, lambda t: cur.get(t), idx_now, tr_now)
     calc = base_nav * (1 + move_now) * fee(base_d, today)
 
     # --- котировка Совкомбанка
@@ -390,7 +407,7 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD):
         if q_date in nav_map:
             q_nav, q_kind = nav_map[q_date], "site"
         elif q_date > d0 and q_date in idx_hist:
-            mv, _ = move_between(d0, lambda t: hist.get(t, {}).get(q_date), idx_hist[q_date])
+            mv, _ = move_between(d0, lambda t: hist.get(t, {}).get(q_date), idx_hist[q_date], tr_hist.get(q_date))
             q_nav, q_kind = nav0 * (1 + mv) * fee(d0, q_date), "est"
         else:
             q_date, q_nav, q_kind = d0, nav0, "site"
