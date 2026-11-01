@@ -453,7 +453,7 @@ def msg_summary(c, now):
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
 
-def signal_card(c, now):
+def signal_card(c, now, notes=()):
     """PNG: крупное слово на зелёном или красном фоне. None, если Pillow нет."""
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -464,7 +464,7 @@ def signal_card(c, now):
     bg, fg, soft = {"buy": ((30, 140, 80), (255, 255, 255), (214, 240, 224)),
                     "sell": ((196, 52, 44), (255, 255, 255), (250, 222, 219)),
                     "none": ((72, 84, 104), (255, 255, 255), (214, 222, 235))}[sig]
-    W, H = 1080, 700
+    W, H = 1080, 700 + 50 * len(notes)
     img = Image.new("RGB", (W, H), bg)
     d = ImageDraw.Draw(img)
 
@@ -496,7 +496,10 @@ def signal_card(c, now):
         d.text((80, y), label, font=small, fill=soft, anchor="lm")
         d.text((W - 80, y), val, font=font("DejaVuSans-Bold.ttf", 42), fill=fg, anchor="rm")
         y += 66
-    d.text((W / 2, H - 38), f"Маркет Пауэр · {now.strftime('%d.%m %H:%M')} МСК", font=font("DejaVuSans.ttf", 30), fill=soft, anchor="mm")
+    for note in notes:
+        d.text((W / 2, y + 10), note, font=font("DejaVuSans.ttf", 32), fill=fg, anchor="mm")
+        y += 50
+    d.text((W / 2, H - 38), f"Маркет Пауэр · {thr_txt()} · {now.strftime('%d.%m %H:%M')} МСК", font=font("DejaVuSans.ttf", 30), fill=soft, anchor="mm")
     import io
     out = io.BytesIO()
     img.save(out, "PNG")
@@ -514,7 +517,8 @@ def tg(method, **params):
 def tg_photo(chat_id, png, caption):
     boundary = "----mplag" + str(int(time.time() * 1000))
     parts = []
-    for k, v in (("chat_id", str(chat_id)), ("caption", caption), ("parse_mode", "HTML")):
+    fields = [("chat_id", str(chat_id))] + ([("caption", caption), ("parse_mode", "HTML")] if caption else [])
+    for k, v in fields:
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
     parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="signal.png"\r\n'
                  f'Content-Type: image/png\r\n\r\n'.encode() + png + b"\r\n")
@@ -532,17 +536,15 @@ def send(state, text):
 
 def send_signal(state, c, now, text=None):
     text = text or msg_signal(c, now)
-    png = signal_card(c, now)
+    notes = []                                   # всё — на карточке, подписи нет
+    if c.get("missing"):
+        notes.append("нет цен: " + ", ".join(c["missing"]) + " — взял как индекс")
+    if c.get("fund_note"):
+        notes.append("сайт УК не ответил, стоимость пая из прошлой проверки")
+    png = signal_card(c, now, notes)
     if png:
         try:
-            # коротко: карточка + одна строка заголовка (и предупреждение, если есть)
-            cap = text.split("\n")[0]
-            notes = []
-            if c.get("missing"):
-                notes.append("⚠️ нет цен: " + ", ".join(c["missing"]))
-            if c.get("fund_note"):
-                notes.append("⚠️ сайт УК не ответил, стоимость пая из прошлой проверки")
-            tg_photo(state["chat_id"], png, "\n".join([cap] + notes))
+            tg_photo(state["chat_id"], png, "")
             print("card sent")
             return
         except Exception as e:  # noqa: BLE001
