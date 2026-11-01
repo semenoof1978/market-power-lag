@@ -54,7 +54,7 @@ def dividends(secid):
     try:
         raw = B.http_get(f"{B.ISS}/securities/{secid}/dividends.json?iss.meta=off")
         if secid in ("SBER", "LKOH"):
-            print(f"  RAW dividends {secid}: {raw[:600]}")
+            print(f"  RAW dividends {secid}: {' '.join(raw.split())[:900]}")
         j = json.loads(raw)
         return [(r["registryclosedate"], r["value"]) for r in B.iss_rows(j, "dividends")
                 if r.get("registryclosedate") and B.ok(r.get("value"))]
