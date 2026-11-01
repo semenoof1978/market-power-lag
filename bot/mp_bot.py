@@ -247,7 +247,8 @@ def fund_move(weights, ret_of, r_idx):
     return move, missing
 
 
-def calculate(now):
+def calculate(now, quote):
+    """quote — котировка от пользователя: {"price", "nav", "date"} или {"price"} (только что прислана) или None."""
     navs, weights, w_date, w_src = load_fund()
     tickers = [t for t, _, _ in weights]
     d0, nav0 = navs[0]
@@ -255,56 +256,89 @@ def calculate(now):
     frm = (date.fromisoformat(d0) - timedelta(days=12)).isoformat()
     hist, idx_hist = load_history(tickers, frm, today)
     cur, idx_now, upd = load_market(tickers)
-
-    def ret(a, b_prices, t):
-        pa = hist.get(t, {}).get(a)
-        pb = b_prices(t)
-        return pb / pa - 1 if ok(pa) and ok(pb) else None
-
-    # 1) расчётная стоимость пая сейчас: от последней стоимости на сайте до текущих цен
     if d0 not in idx_hist:
         raise SourceError("Мосбиржа", f"нет закрытия индекса за {ru_date(d0)}")
-    r_idx_now = idx_now / idx_hist[d0] - 1
-    move_now, missing = fund_move(weights, lambda t: ret(d0, lambda x: cur.get(x), t), r_idx_now)
-    days_since = (now.date() - date.fromisoformat(d0)).days
-    calc = nav0 * (1 + move_now) * (1 - FUND_FEE * days_since / 365)
-
-    # 2) какая стоимость пая сейчас в котировке Совкомбанка
     trading = sorted(d for d in idx_hist if d < today)
-    q_date = trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0
     nav_map = dict(navs)
-    if q_date in nav_map:
-        q_nav, q_est = nav_map[q_date], False
-    elif q_date > d0 and q_date in idx_hist:
-        mv, _ = fund_move(weights, lambda t: ret(d0, lambda x: hist.get(x, {}).get(q_date), t),
-                          idx_hist[q_date] / idx_hist[d0] - 1)
-        q_nav = nav0 * (1 + mv) * (1 - FUND_FEE * (date.fromisoformat(q_date) - date.fromisoformat(d0)).days / 365)
-        q_est = True
-    else:
-        q_date, q_nav, q_est = d0, nav0, False
 
-    ask, bid = q_nav * (1 + SPREAD), q_nav * (1 - SPREAD)
+    def move_between(a, price_b, idx_b):
+        """Изменение пая от закрытия дня a до цен price_b(t) и индекса idx_b."""
+        def r(t):
+            pa, pb = hist.get(t, {}).get(a), price_b(t)
+            return pb / pa - 1 if ok(pa) and ok(pb) else None
+        return fund_move(weights, r, idx_b / idx_hist[a] - 1)
+
+    def fee(a, b):
+        return 1 - FUND_FEE * (date.fromisoformat(b) - date.fromisoformat(a)).days / 365
+
+    # --- котировка пользователя: определить, за какую дату в ней стоимость пая
+    quote_status = None
+    if quote and "date" not in quote:
+        q_nav = quote["price"] / (1 + SPREAD)
+        match = next((d for d, n in navs if abs(n - q_nav) / n < 0.0012), None)
+        if match:
+            q_d = match
+        else:
+            later = [d for d in trading if d > d0]
+            q_d = later[0] if later else (trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0)
+        quote = {"price": quote["price"], "nav": round(q_nav, 4), "date": q_d}
+        quote_status = "new"
+    expected = trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0
+    if quote and quote_status != "new" and quote["date"] < expected:
+        quote, quote_status = None, "expired"   # прошёл новый торговый день — котировка обновилась
+
+    # --- база расчёта: котировка пользователя, если есть, иначе сайт УК
+    if quote and quote["date"] in idx_hist:
+        base_d, base_nav, base_src = quote["date"], quote["nav"], "user"
+    else:
+        base_d, base_nav, base_src = d0, nav0, "site"
+    move_now, missing = move_between(base_d, lambda t: cur.get(t), idx_now)
+    calc = base_nav * (1 + move_now) * fee(base_d, today)
+
+    # --- котировка Совкомбанка
+    if quote:
+        q_date, q_nav, q_kind, ask = quote["date"], quote["nav"], "user", quote["price"]
+    else:
+        q_date = expected
+        if q_date in nav_map:
+            q_nav, q_kind = nav_map[q_date], "site"
+        elif q_date > d0 and q_date in idx_hist:
+            mv, _ = move_between(d0, lambda t: hist.get(t, {}).get(q_date), idx_hist[q_date])
+            q_nav, q_kind = nav0 * (1 + mv) * fee(d0, q_date), "est"
+        else:
+            q_date, q_nav, q_kind = d0, nav0, "site"
+        ask = q_nav * (1 + SPREAD)
+    bid = q_nav * (1 - SPREAD)
+
     edge_buy = calc * (1 - SPREAD) / ask - 1      # купить сейчас, продать после обновления
     edge_sell = bid / (calc * (1 + SPREAD)) - 1   # продать сейчас, откупить после обновления
     signal = "buy" if edge_buy >= THRESHOLD else "sell" if edge_sell >= THRESHOLD else "none"
     return {
         "signal": signal, "calc": calc, "move": move_now, "missing": missing,
-        "d0": d0, "nav0": nav0, "q_date": q_date, "q_nav": q_nav, "q_est": q_est,
+        "base_d": base_d, "base_nav": base_nav, "base_src": base_src,
+        "d0": d0, "nav0": nav0, "q_date": q_date, "q_nav": q_nav, "q_kind": q_kind,
         "ask": ask, "bid": bid, "edge_buy": edge_buy, "edge_sell": edge_sell,
         "upd": upd, "w_src": w_src, "w_date": w_date,
+        "quote": quote, "quote_status": quote_status,
     }
 
 
 # ---------------------------------------------------------------- messages
 def msg_body(c, now):
-    q = (f"≈ {rub(c['q_nav'])} (оценка за {ru_date(c['q_date'])}, на сайте УК её ещё нет)" if c["q_est"]
-         else f"{rub(c['q_nav'])} за {ru_date(c['q_date'])}")
+    base = (f"от твоей котировки за {ru_date(c['base_d'])}" if c["base_src"] == "user"
+            else f"к {ru_date(c['base_d'])}")
+    if c["q_kind"] == "user":
+        q = f"<b>{rub(c['ask'])}</b> (прислал ты) → стоимость пая в ней {rub(c['q_nav'])} за {ru_date(c['q_date'])}"
+    elif c["q_kind"] == "est":
+        q = f"≈ {rub(c['ask'])} (оценка бота, стоимость пая за {ru_date(c['q_date'])} на сайте УК ещё нет)"
+    else:
+        q = f"≈ {rub(c['ask'])} (стоимость пая за {ru_date(c['q_date'])} + спред)"
     lines = [
         f"Расчётная стоимость пая: <b>{rub(c['calc'])}</b>",
-        f"   по ценам Мосбиржи на {(c['upd'] or now.strftime('%H:%M'))[:5]} МСК, {pct(c['move'])} к {ru_date(c['d0'])}",
+        f"   по ценам Мосбиржи на {(c['upd'] or now.strftime('%H:%M'))[:5]} МСК, {pct(c['move'])} {base}",
         f"Фактическая стоимость пая: <b>{rub(c['nav0'])}</b> (сайт УК, {ru_date(c['d0'])})",
-        f"В котировке Совкомбанка: {q}",
-        f"   купить ≈ {rub(c['ask'])}, продать ≈ {rub(c['bid'])}",
+        f"Котировка «Продают по»: {q}",
+        f"   продать сейчас ≈ {rub(c['bid'])}",
         f"Выгода с учётом спреда {str(SPREAD * 100).replace('.', ',')}%: покупка {pct(c['edge_buy'])}, выход {pct(c['edge_sell'])}",
     ]
     if c["missing"]:
@@ -313,17 +347,63 @@ def msg_body(c, now):
 
 
 def msg_signal(c, now):
-    head = {"buy": "🟢 <b>ПОКУПАТЬ</b>", "sell": "🔴 <b>ПРОДАВАТЬ</b>"}[c["signal"]]
+    head = {"buy": "🟩🟩🟩 <b>ПОКУПАТЬ</b> 🟩🟩🟩", "sell": "🟥🟥🟥 <b>ПРОДАВАТЬ</b> 🟥🟥🟥"}[c["signal"]]
     why = ("Расчётная стоимость пая выше котировки — пай отстаёт от рынка." if c["signal"] == "buy"
            else "Расчётная стоимость пая ниже котировки — пай ещё не учёл падение.")
-    return (f"{head} · Маркет Пауэр\n{why}\n\n{msg_body(c, now)}\n\n"
+    return (f"{head}\n{why}\n\n{msg_body(c, now)}\n\n"
             f"Сигнал верен, если цены удержатся до закрытия дня. Проверь котировку в приложении перед сделкой.")
 
 
 def msg_summary(c, now):
     state = {"buy": "сигнал «Покупать»", "sell": "сигнал «Продавать»", "none": "сигнала нет"}[c["signal"]]
+    tip = "" if c["q_kind"] == "user" else "\n\nДля точного расчёта пришли котировку из приложения, например: котировка 154,83"
     return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state} (порог {str(THRESHOLD * 100).replace('.', ',')}%)\n\n"
-            f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.")
+            f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{tip}")
+
+
+# ---------------------------------------------------------------- signal card (picture)
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
+
+def signal_card(c, now):
+    """PNG: крупное слово на зелёном или красном фоне. None, если Pillow нет."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    buy = c["signal"] == "buy"
+    bg, fg, soft = ((30, 140, 80), (255, 255, 255), (214, 240, 224)) if buy else ((196, 52, 44), (255, 255, 255), (250, 222, 219))
+    W, H = 1080, 640
+    img = Image.new("RGB", (W, H), bg)
+    d = ImageDraw.Draw(img)
+
+    def font(name, size):
+        for path in (os.path.join(FONT_DIR, name), f"/usr/share/fonts/truetype/dejavu/{name}"):
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        return ImageFont.load_default()
+
+    big, mid, small = font("DejaVuSans-Bold.ttf", 150), font("DejaVuSans-Bold.ttf", 52), font("DejaVuSans.ttf", 38)
+    word = "ПОКУПАТЬ" if buy else "ПРОДАВАТЬ"
+    while d.textlength(word, font=big) > W - 100 and big.size > 60:
+        big = font("DejaVuSans-Bold.ttf", big.size - 10)
+    d.text((W / 2, 150), word, font=big, fill=fg, anchor="mm")
+    edge = c["edge_buy"] if buy else c["edge_sell"]
+    d.text((W / 2, 275), f"выгода {pct(edge)}", font=mid, fill=fg, anchor="mm")
+    d.line((80, 345, W - 80, 345), fill=soft, width=3)
+    rows = [("Расчётная стоимость пая", rub(c["calc"])),
+            ("Котировка «Продают по»", rub(c["ask"])),
+            (f"Фактическая (сайт УК, {ru_date(c['d0'])[:5]})", rub(c["nav0"]))]
+    y = 395
+    for label, val in rows:
+        d.text((80, y), label, font=small, fill=soft, anchor="lm")
+        d.text((W - 80, y), val, font=font("DejaVuSans-Bold.ttf", 42), fill=fg, anchor="rm")
+        y += 66
+    d.text((W / 2, H - 38), f"Маркет Пауэр · {now.strftime('%d.%m %H:%M')} МСК", font=font("DejaVuSans.ttf", 30), fill=soft, anchor="mm")
+    import io
+    out = io.BytesIO()
+    img.save(out, "PNG")
+    return out.getvalue()
 
 
 # ---------------------------------------------------------------- telegram
@@ -334,19 +414,49 @@ def tg(method, **params):
         return json.loads(r.read().decode())
 
 
+def tg_photo(chat_id, png, caption):
+    boundary = "----mplag" + str(int(time.time() * 1000))
+    parts = []
+    for k, v in (("chat_id", str(chat_id)), ("caption", caption), ("parse_mode", "HTML")):
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="signal.png"\r\n'
+                 f'Content-Type: image/png\r\n\r\n'.encode() + png + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/sendPhoto", data=b"".join(parts),
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
 def send(state, text):
     tg("sendMessage", chat_id=state["chat_id"], text=text, parse_mode="HTML", disable_web_page_preview="true")
     print("SENT:", text.split("\n")[0])
 
 
+def send_signal(state, c, now):
+    text = msg_signal(c, now)
+    png = signal_card(c, now)
+    if png:
+        try:
+            tg_photo(state["chat_id"], png, text[:1024])
+            print("SENT PHOTO:", c["signal"])
+            return
+        except Exception as e:  # noqa: BLE001
+            print("sendPhoto failed, fallback to text:", e)
+    send(state, text)
+
+
+QUOTE_RE = re.compile(r"(\d{2,4}(?:[.,]\d{1,2})?)")
+
+
 def incoming(state):
-    """chat_id из первого сообщения боту и команды /status."""
-    asks = False
+    """chat_id из первого сообщения, «статус», «котировка 154,83», «котировка авто»."""
+    res = {"asked": False, "quote": None, "quote_off": False}
     try:
         upd = tg("getUpdates", offset=state.get("tg_offset", 0), timeout=0)
     except Exception as e:  # noqa: BLE001
         print("getUpdates failed:", e)
-        return False
+        return res
     for u in upd.get("result", []):
         state["tg_offset"] = u["update_id"] + 1
         m = u.get("message") or {}
@@ -356,9 +466,20 @@ def incoming(state):
         if not state.get("chat_id"):
             state["chat_id"] = chat
             state["welcome"] = True
-        if chat == state.get("chat_id") and re.search(r"статус|status|сейчас", (m.get("text") or "").lower()):
-            asks = True
-    return asks
+        if chat != state.get("chat_id"):
+            continue
+        text = (m.get("text") or "").lower().strip()
+        if re.search(r"статус|status|сейчас", text):
+            res["asked"] = True
+        if "котиров" in text or re.fullmatch(r"\d{2,4}(?:[.,]\d{1,2})?\s*(₽|р|руб\.?)?", text):
+            if re.search(r"авто|сброс|удал", text):
+                res["quote_off"], res["quote"] = True, None
+                continue
+            m2 = QUOTE_RE.search(text)
+            v = num(m2.group(1)) if m2 else float("nan")
+            if 20 < v < 2000:
+                res["quote"], res["quote_off"] = v, False
+    return res
 
 
 # ---------------------------------------------------------------- state
@@ -385,7 +506,8 @@ def main():
     state = load_state()
     if CHAT_ID:
         state["chat_id"] = int(CHAT_ID) if CHAT_ID.lstrip("-").isdigit() else CHAT_ID
-    asked = incoming(state)
+    inc = incoming(state)
+    asked = inc["asked"]
     if not state.get("chat_id"):
         print("Боту ещё никто не написал. Открой бота в Telegram и нажми Start.")
         save_state(state)
@@ -393,23 +515,40 @@ def main():
     if state.pop("welcome", False):
         send(state, "👋 Бот «Лаг Маркет Пауэр» подключён.\n"
                     f"Проверяю каждый час с 7 до 0 МСК, сигнал при выгоде от {str(THRESHOLD * 100).replace('.', ',')}% после спреда, "
-                    f"сводка около {SUMMARY_HOUR}:00. Напиши «статус», и я пришлю текущий расчёт со следующей проверкой.")
+                    f"сводка около {SUMMARY_HOUR}:00.\n"
+                    "Команды (ответ — при ближайшей проверке):\n"
+                    "• «статус» — текущий расчёт\n"
+                    "• «котировка 154,83» — цена «Продают по» из приложения, считаю от неё\n"
+                    "• «котировка авто» — снова оценивать котировку самому")
+    elif not state.get("v2_notice"):
+        send(state, "🆕 Обновление бота:\n"
+                    "• «котировка 154,83» — пришли цену «Продают по» из приложения, буду считать от неё\n"
+                    "• «котировка авто» — снова оценивать котировку самому\n"
+                    "• сигналы теперь приходят картинкой: зелёной «ПОКУПАТЬ» или красной «ПРОДАВАТЬ»\n"
+                    "Ответ на команды — при ближайшей ежечасной проверке.")
+    state["v2_notice"] = True
+    if inc["quote_off"]:
+        state.pop("quote", None)
+        send(state, "Ок, котировку снова оцениваю сам.")
+    quote = {"price": inc["quote"]} if inc["quote"] else state.get("quote")
 
     # ---- расчёт и оповещения о связи
     try:
-        c = calculate(now)
+        c = calculate(now, quote)
     except SourceError as e:
         fails = state.get("fails", 0) + 1
         state["fails"] = fails
         state["last_error"] = str(e)
         print("ERROR:", e)
-        if fails == FAILS_TO_ALERT or MODE == "summary" or asked:
+        if fails == FAILS_TO_ALERT or MODE == "summary" or asked or inc["quote"]:
             send(state, f"⚠️ <b>Нет связи</b>: {e.source} — {e.detail}.\n"
                         f"Не получается уже {fails} проверки подряд. Сигналы не приходят, пока связь не вернётся. "
                         f"Сообщу, когда восстановится.")
             state["alerted"] = True
         elif fails > FAILS_TO_ALERT and fails % 6 == 0:
             send(state, f"⚠️ Связи всё ещё нет: {e.source} — {e.detail}. Проверок без данных подряд: {fails}.")
+        if inc["quote"]:
+            state["quote"] = {"price": inc["quote"]}
         save_state(state)
         return 0
     except Exception as e:  # noqa: BLE001
@@ -423,24 +562,40 @@ def main():
     if state.get("alerted"):
         send(state, f"✅ Связь восстановлена после {state.get('fails', 0)} неудачных проверок.")
     state.update(fails=0, alerted=False, last_error=None)
+
+    # ---- котировка пользователя
+    if c["quote_status"] == "new":
+        state["quote"] = c["quote"]
+        send(state, f"✅ Принял котировку {rub(c['quote']['price'])}. Стоимость пая в ней {rub(c['quote']['nav'])} "
+                    f"за {ru_date(c['quote']['date'])}. Считаю от неё, пока Совкомбанк не обновит цену.")
+        asked = True
+    elif c["quote_status"] == "expired":
+        state.pop("quote", None)
+        send(state, "ℹ️ Твоя котировка устарела: прошёл новый торговый день. Снова оцениваю её сам. "
+                    "Пришли новую, например: котировка 154,83")
+    elif c["quote"]:
+        state["quote"] = c["quote"]
     print(json.dumps({k: v for k, v in c.items() if k != "missing"}, ensure_ascii=False, default=str))
 
     # ---- сигнал
     last, last_at = state.get("signal", "none"), state.get("signal_at")
     hours = (now - datetime.fromisoformat(last_at)).total_seconds() / 3600 if last_at else 1e9
-    if c["signal"] != "none" and (c["signal"] != last or hours >= REPEAT_HOURS):
-        send(state, msg_signal(c, now))
+    signal_sent = False
+    if c["signal"] != "none" and (c["signal"] != last or hours >= REPEAT_HOURS or asked):
+        send_signal(state, c, now)
         state["signal_at"] = now.isoformat()
+        signal_sent = True
     elif c["signal"] == "none" and last != "none":
         send(state, f"⚪ Сигнал «{'Покупать' if last == 'buy' else 'Продавать'}» больше не действует.\n\n{msg_body(c, now)}")
     state["signal"] = c["signal"]
 
     # ---- сводка
     today = now.date().isoformat()
-    if MODE == "summary" or asked or (now.hour >= SUMMARY_HOUR and state.get("summary_date") != today):
+    due = now.hour >= SUMMARY_HOUR and state.get("summary_date") != today
+    if (MODE == "summary" or asked or due) and not (signal_sent and not due):
         send(state, msg_summary(c, now))
-        if MODE != "summary" and not asked:
-            state["summary_date"] = today
+    if due:
+        state["summary_date"] = today
 
     save_state(state)
     return 0

@@ -31,6 +31,9 @@ jobs:
           key: bot-state-${{ github.run_id }}
           restore-keys: bot-state-
 
+      - name: Install Pillow
+        run: pip install --quiet --disable-pip-version-check pillow || true
+
       - name: Run bot
         run: mkdir -p state && python3 bot/mp_bot.py
         env:
