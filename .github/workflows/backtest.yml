@@ -1,0 +1,16 @@
+name: Backtest
+
+on:
+  push:
+    branches: [main]
+    paths: ['research/**', '.github/workflows/backtest.yml']
+  workflow_dispatch: {}
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run backtest
+        run: python3 research/backtest.py
