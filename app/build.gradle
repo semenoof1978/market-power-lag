@@ -1,0 +1,43 @@
+plugins {
+    id 'com.android.application'
+}
+
+def runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
+
+android {
+    namespace 'ru.mplag.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'ru.mplag.app'
+        minSdk 24
+        targetSdk 34
+        versionCode runNumber
+        versionName "1.0." + runNumber
+    }
+
+    // Fixed key, so every new build installs over the previous one
+    signingConfigs {
+        fixed {
+            storeFile file('lag.keystore')
+            storePassword 'mplag-2026'
+            keyAlias 'lag'
+            keyPassword 'mplag-2026'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.fixed
+        }
+        debug {
+            signingConfig signingConfigs.fixed
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

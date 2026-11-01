@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Лаг Маркет Пауэр</title>
+<style>
+/* One narrow column: verdict, quote, holdings, model check, settings */
+:root{
+  --bg:#f3f2ee; --surface:#ffffff; --line:#dcd8cf; --fg:#1e1d1a; --muted:#6c675d;
+  --accent:#9a6a2f; --accent-soft:#f1e6d6;
+  --buy:#1f7a4d; --buy-soft:#e1f1e8; --sell:#b23a2e; --sell-soft:#f8e3df; --wait:#5f6470; --wait-soft:#e9eaee;
+  --f-body:system-ui,-apple-system,"Roboto","Segoe UI",sans-serif;
+  --f-num:"Roboto Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#15140f; --surface:#1f1d18; --line:#36332b; --fg:#ece8df; --muted:#a39d90;
+  --accent:#d6a463; --accent-soft:#3a2e1d;
+  --buy:#5cc28e; --buy-soft:#173326; --sell:#ef7d6f; --sell-soft:#3b1d19; --wait:#aab0bd; --wait-soft:#262830;
+  color-scheme:dark}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.45;-webkit-text-size-adjust:100%}
+.wrap{max-width:600px;margin:0 auto;padding:14px max(14px,env(safe-area-inset-right,0px)) 40px max(14px,env(safe-area-inset-left,0px));display:flex;flex-direction:column;gap:14px}
+header{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:12px;margin:3px 0 0}
+.num{font-family:var(--f-num);font-variant-numeric:tabular-nums}
+.label{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600}
+button{font-family:var(--f-body);font-size:14px;font-weight:600;padding:9px 14px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--fg)}
+button:active{opacity:.7}
+button.refresh{flex:none}
+.verdict{border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:10px;border:1px solid var(--line)}
+.verdict[data-s="buy"]{background:var(--buy-soft);border-color:var(--buy)}
+.verdict[data-s="sell"]{background:var(--sell-soft);border-color:var(--sell)}
+.verdict[data-s="wait"],.verdict[data-s="none"]{background:var(--wait-soft)}
+.v-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.v-word{font-weight:800;font-size:25px}
+.verdict[data-s="buy"] .v-word{color:var(--buy)}
+.verdict[data-s="sell"] .v-word{color:var(--sell)}
+.verdict[data-s="wait"] .v-word,.verdict[data-s="none"] .v-word{color:var(--wait)}
+.v-text{margin:0;font-size:14px}
+.v-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.v-cell{background:var(--surface);border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:1px;min-width:0}
+.v-cell b{font-family:var(--f-num);font-weight:500;font-size:18px}
+.pos{color:var(--buy)} .neg{color:var(--sell)}
+section{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.kv{display:grid;grid-template-columns:1fr auto;gap:5px 12px;font-size:14px}
+.kv span:nth-child(even){font-family:var(--f-num);text-align:right}
+.row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
+.row .name small{display:block;color:var(--muted);font-size:12px}
+input[type=text]{font-family:var(--f-num);font-size:16px;width:110px;padding:8px 10px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--fg);text-align:right}
+select{font-size:14px;padding:8px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+.unit{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{font-size:11px;color:var(--muted);font-weight:600;text-align:right;padding:4px 4px;text-transform:uppercase;letter-spacing:.04em}
+th:first-child,td:first-child{text-align:left}
+td{padding:6px 3px;border-top:1px solid var(--line);text-align:right;font-family:var(--f-num);white-space:nowrap}
+td:first-child{font-family:var(--f-body);white-space:normal}
+td small{display:block;color:var(--muted);font-size:11px}
+.hint{font-size:12.5px;color:var(--muted);margin:0}
+.warn{font-size:13px;color:var(--sell);margin:0}
+details summary{font-weight:600;font-size:14px;cursor:pointer}
+details[open] summary{margin-bottom:8px}
+.stack{display:flex;flex-direction:column;gap:8px}
+.foot{font-size:12px;color:var(--muted);margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Лаг Маркет Пауэр</h1>
+      <p class="sub" id="status">Загрузка…</p>
+    </div>
+    <button class="refresh" id="refresh" type="button">Обновить</button>
+  </header>
+
+  <div class="verdict" id="verdict" data-s="none" aria-live="polite">
+    <div class="v-head">
+      <span class="v-word" id="vWord">Загрузка</span>
+      <span class="num" id="vMove"></span>
+    </div>
+    <p class="v-text" id="vText">Тяну цены с Мосбиржи и стоимость пая с сайта УК.</p>
+    <div class="v-grid">
+      <div class="v-cell"><span class="label">Докупить сейчас</span><b id="edgeBuy">—</b><span class="hint num" id="edgeBuyRub"></span></div>
+      <div class="v-cell"><span class="label">Выйти в рубли</span><b id="edgeSell">—</b><span class="hint num" id="edgeSellRub"></span></div>
+    </div>
+  </div>
+
+  <section>
+    <span class="label">Котировка</span>
+    <div class="row">
+      <div class="name">«Продают по» в Совкомбанке<small>Необязательно. Без неё котировка считается из стоимости пая на сайте УК</small></div>
+      <div class="unit"><input type="text" id="ask" inputmode="decimal" placeholder="авто">₽</div>
+    </div>
+    <div class="kv" id="quoteKv"></div>
+    <p class="hint" id="quoteNote"></p>
+    <div class="stack" id="manualNav" hidden>
+      <p class="warn">Не удалось прочитать стоимость пая с сайта УК. Введи её вручную.</p>
+      <div class="row"><div class="name">Стоимость пая</div><div class="unit"><input type="text" id="mNav" inputmode="decimal">₽</div></div>
+      <div class="row"><div class="name">На дату<small>дд.мм.гггг</small></div><div class="unit"><input type="text" id="mDate" inputmode="numeric" placeholder="30.10.2026"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <span class="label">Бумаги фонда: с даты котировки</span>
+    <div class="tbl"><table>
+      <thead><tr><th>Бумага</th><th>Вес</th><th>Было</th><th>Сейчас</th><th>Изм.</th></tr></thead>
+      <tbody id="holdBody"></tbody>
+    </table></div>
+    <p class="hint" id="weightsNote"></p>
+  </section>
+
+  <section>
+    <details id="modelBox">
+      <summary>Проверка модели на прошлых днях</summary>
+      <p class="hint">Как модель предсказала бы реальные изменения стоимости пая. Если ошибка большая, порог входа нужно поднять.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Дата</th><th>Модель</th><th>Факт</th><th>Ошибка</th></tr></thead>
+        <tbody id="modelBody"></tbody>
+      </table></div>
+      <p class="hint" id="modelNote"></p>
+    </details>
+  </section>
+
+  <section>
+    <details id="settingsBox">
+      <summary>Настройки</summary>
+      <div class="stack">
+        <div class="row"><div class="name">Спред маркет-мейкера<small>По твоим сделкам: ±0,5%</small></div><div class="unit"><input type="text" id="spread" inputmode="decimal" value="0,5">%</div></div>
+        <div class="row"><div class="name">Порог входа/выхода<small>Запас на разворот к закрытию</small></div><div class="unit"><input type="text" id="thr" inputmode="decimal" value="0,7">%</div></div>
+        <div class="row"><div class="name">Кэш в фонде<small>Не двигается с рынком</small></div><div class="unit"><input type="text" id="cash" inputmode="decimal" value="0">%</div></div>
+        <div class="row"><div class="name">Сумма сделки</div><div class="unit"><input type="text" id="amount" inputmode="decimal" value="373 000">₽</div></div>
+        <div class="row"><div class="name">Цена закрытия<small>Какой ценой УК оценивает акции</small></div>
+          <select id="closeKey"><option value="CLOSE">Последняя сделка дня</option><option value="LEGALCLOSEPRICE">Официальная (основная сессия)</option></select></div>
+        <div class="row"><div class="name">Автообновление цен</div>
+          <select id="every"><option value="30">30 сек</option><option value="60" selected>1 мин</option><option value="300">5 мин</option></select></div>
+      </div>
+    </details>
+  </section>
+
+  <p class="foot">Цены Мосбиржи из открытого API приходят с задержкой около 15 минут. Котировку Совкомбанка приложение не видит и считает её как стоимость пая ±спред. Сигнал верен, только если цены продержатся до закрытия дня, по которому посчитают новую стоимость пая, и маркет-мейкер не сменит правила. Это калькулятор, а не рекомендация.</p>
+</div>
+
+<script>
+"use strict";
+/* ---------- data ---------- */
+const DEF_W=[["LKOH","Лукойл",9.71],["SVCB","Совкомбанк",8.49],["SBER","Сбербанк",8.43],["DOMRF","ДОМ.РФ",8.30],["T","Т-Технологии",7.95],["TATNP","Татнефть-п",6.66],["NVTK","Новатэк",5.85],["TRNFP","Транснефть-п",4.36],["SNGSP","Сургутнефтегаз-п",3.88],["NLMK","НЛМК",3.60]];
+const DEF_W_DATE="30 сентября 2026";
+const MAP=[["ГАЗПРОМ НЕФТЬ","SIBN","Газпром нефть"],["МТС-БАНК","MBNK","МТС-Банк"],["БАНК САНКТ-ПЕТЕРБУРГ","BSPB","Банк СПб"],["НОРИЛЬСКИЙ НИКЕЛЬ","GMKN","Норникель"],["МОСКОВСКАЯ БИРЖА","MOEX","Мосбиржа"],["СУРГУТНЕФТЕГАЗ","SNGSP","Сургутнефтегаз-п"],["Т-ТЕХНОЛОГИИ","T","Т-Технологии"],["ТРАНСНЕФТЬ","TRNFP","Транснефть-п"],["СОВКОМФЛОТ","FLOT","Совкомфлот"],["СОВКОМБАНК","SVCB","Совкомбанк"],["СЕВЕРСТАЛЬ","CHMF","Северсталь"],["ГРУППА АСТРА","ASTR","Астра"],["ХЭДХАНТЕР","HEAD","HeadHunter"],["ТАТНЕФТЬ","TATNP","Татнефть-п"],["СБЕРБАНК","SBER","Сбербанк"],["ИНТЕР РАО","IRAO","Интер РАО"],["РОСНЕФТЬ","ROSN","Роснефть"],["СЕЛИГДАР","SELG","Селигдар"],["РУСГИДРО","HYDR","РусГидро"],["АЭРОФЛОТ","AFLT","Аэрофлот"],["ПОЗИТИВ","POSI","Positive"],["ФОСАГРО","PHOR","ФосАгро"],["НОВАТЭК","NVTK","Новатэк"],["ГАЗПРОМ","GAZP","Газпром"],["ЛУКОЙЛ","LKOH","Лукойл"],["ДОМ.РФ","DOMRF","ДОМ.РФ"],["МАГНИТ","MGNT","Магнит"],["ЯНДЕКС","YDEX","Яндекс"],["АЛРОСА","ALRS","АЛРОСА"],["РУСАЛ","RUAL","Русал"],["ИКС 5","X5","X5"],["ЛЕНТА","LENT","Лента"],["ПОЛЮС","PLZL","Полюс"],["ОЗОН","OZON","Озон"],["НЛМК","NLMK","НЛМК"],["ММК","MAGN","ММК"],["АФК","AFKS","АФК Система"],["ЮГК","UGLD","ЮГК"],["ВТБ","VTBR","ВТБ"],["МТС","MTSS","МТС"],["X5","X5","X5"]];
+const UK_URL="https://contrada-capital.ru/products/opif/marketpower";
+const ISS="https://iss.moex.com/iss";
+const SKEY="mp-lag-app-v1";
+
+const S={navs:[],navErr:null,weights:DEF_W.map(([t,n,w])=>({t,n,w})),wDate:DEF_W_DATE,wSource:"default",
+  hist:{},idxHist:{},histErr:null,md:{},idx:null,mdErr:null,mdTime:null,fetchedAt:null,slowAt:0};
+
+/* ---------- helpers ---------- */
+const $=id=>document.getElementById(id);
+const num=v=>{if(v==null)return NaN;const n=parseFloat(String(v).replace(/[\s  ]/g,"").replace(",","."));return isFinite(n)?n:NaN};
+const fmt=(v,d=2)=>isFinite(v)?v.toLocaleString("ru-RU",{minimumFractionDigits:d,maximumFractionDigits:d}):"—";
+const pct=v=>isFinite(v)?(v>0?"+":"")+fmt(v*100)+"%":"—";
+const rub=v=>isFinite(v)?(v>0?"+":v<0?"−":"")+Math.abs(Math.round(v)).toLocaleString("ru-RU")+" ₽":"";
+const iso2ru=d=>d?d.slice(8,10)+"."+d.slice(5,7)+"."+d.slice(0,4):"—";
+const ru2iso=d=>{const m=/^(\d{2})\.(\d{2})\.(\d{4})$/.exec((d||"").trim());return m?m[3]+"-"+m[2]+"-"+m[1]:null};
+const isoLocal=dt=>{const z=n=>String(n).padStart(2,"0");return dt.getFullYear()+"-"+z(dt.getMonth()+1)+"-"+z(dt.getDate())};
+const addDays=(iso,n)=>{const d=new Date(iso+"T12:00:00");d.setDate(d.getDate()+n);return isoLocal(d)};
+const fmtP=v=>fmt(v,v>=1000?0:v>=100?1:2);
+const cls=v=>v>0?"pos":v<0?"neg":"";
+
+/* ---------- network: through Java when inside the app ---------- */
+const pending={};let seq=0;
+window.__nativeResult=(id,ok,body)=>{const p=pending[id];if(!p)return;delete pending[id];ok?p.res(body):p.rej(new Error(body))};
+function get(url){
+  if(window.Native&&window.Native.fetch){
+    return new Promise((res,rej)=>{const id="r"+(++seq);pending[id]={res,rej};
+      setTimeout(()=>{if(pending[id]){delete pending[id];rej(new Error("таймаут"))}},40000);
+      window.Native.fetch(id,url)});
+  }
+  return fetch(url).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text()});
+}
+const getJSON=u=>get(u).then(t=>JSON.parse(t));
+function rows(j,name){const t=j&&j[name];if(!t||!t.columns)return[];return t.data.map(r=>{const o={};t.columns.forEach((c,i)=>o[c]=r[i]);return o})}
+
+/* ---------- parsing the fund page ---------- */
+function pageText(html){
+  return html.replace(/<[^>]+>/g," ").replace(/&nbsp;|&#160;|\\u00a0| | |\\u202f/g," ")
+    .replace(/&quot;|&#34;/g,'"').replace(/&laquo;|&raquo;/g,'"').replace(/&amp;/g,"&");
+}
+function parseNavs(text){
+  const out=[],seen={};
+  const reDate=/(\d{2})\.(\d{2})\.(20\d{2})/g;let m;
+  while((m=reDate.exec(text))){
+    const iso=m[3]+"-"+m[2]+"-"+m[1];
+    if(seen[iso])continue;
+    const tail=text.slice(reDate.lastIndex,reDate.lastIndex+260);
+    const nums=[];const reN=/[+-]?\d[\d ]*,\d{2}/g;let k;
+    while((k=reN.exec(tail))&&nums.length<4){
+      const before=tail.slice(0,k.index);
+      if(/\d{2}\.\d{2}\.20\d{2}/.test(before))break; // next row reached
+      nums.push(num(k[0]));
+    }
+    if(nums.length>=4&&nums[0]>1e6&&nums[2]>20&&nums[2]<2000){seen[iso]=1;out.push({date:iso,nav:nums[2],chg:nums[3]/100})}
+  }
+  out.sort((a,b)=>a.date<b.date?1:-1);
+  return out;
+}
+function parseWeights(text){
+  const up=text.toUpperCase();
+  const a=up.indexOf("ТОП-10 ЭМИТЕНТОВ");if(a<0)return null;
+  let b=up.indexOf("ОТРАСЛЕВАЯ",a);if(b<0)b=a+6000;
+  const seg=up.slice(a,b);
+  const alts=MAP.map(x=>x[0].replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|");
+  const re=new RegExp("("+alts+")[^%]{0,120}?(\\d{1,2}[.,]\\d{1,2})\\s*%","g");
+  const res=[],seen={};let m;
+  while((m=re.exec(seg))){
+    const e=MAP.find(x=>x[0]===m[1]);if(!e||seen[e[1]])continue;
+    seen[e[1]]=1;res.push({t:e[1],n:e[2],w:num(m[2])});
+  }
+  const sum=res.reduce((s,x)=>s+x.w,0);
+  if(res.length<5||sum<35||sum>100)return null;
+  const d=/АКТУАЛЬНЫ ПО СОСТОЯНИЮ НА (\d{1,2} [А-ЯЁ]+ \d{4})/.exec(seg);
+  return {list:res,date:d?d[1].toLowerCase():"?"};
+}
+
+/* ---------- loading ---------- */
+async function loadUK(){
+  try{
+    const html=await get(UK_URL);
+    const text=pageText(html);
+    const navs=parseNavs(text);
+    if(navs.length){S.navs=navs;S.navErr=null}else{S.navErr="на странице УК не нашлась таблица стоимости пая"}
+    const w=parseWeights(text);
+    if(w){S.weights=w.list;S.wDate=w.date;S.wSource="site"}
+  }catch(e){S.navErr="сайт УК недоступен ("+e.message+")"}
+}
+async function loadHistory(){
+  const till=isoLocal(new Date());
+  const oldest=S.navs.length?S.navs[Math.min(7,S.navs.length-1)].date:addDays(till,-20);
+  const from=addDays(oldest,-4);
+  const tick=S.weights.map(x=>x.t);
+  const errs=[];
+  await Promise.all([
+    ...tick.map(t=>getJSON(`${ISS}/history/engines/stock/markets/shares/boards/TQBR/securities/${t}.json?iss.meta=off&iss.only=history&from=${from}&till=${till}&history.columns=TRADEDATE,CLOSE,LEGALCLOSEPRICE`)
+      .then(j=>{const h={};rows(j,"history").forEach(r=>h[r.TRADEDATE]=r);S.hist[t]=h}).catch(e=>errs.push(t))),
+    getJSON(`${ISS}/history/engines/stock/markets/index/securities/IMOEX.json?iss.meta=off&iss.only=history&from=${from}&till=${till}&history.columns=TRADEDATE,CLOSE`)
+      .then(j=>{const h={};rows(j,"history").forEach(r=>h[r.TRADEDATE]=r.CLOSE);S.idxHist=h}).catch(e=>errs.push("IMOEX"))
+  ]);
+  S.histErr=errs.length?"нет истории: "+errs.join(", "):null;
+}
+async function loadMarket(){
+  const tick=S.weights.map(x=>x.t).join(",");
+  const errs=[];
+  await Promise.all([
+    getJSON(`${ISS}/engines/stock/markets/shares/boards/TQBR/securities.json?iss.meta=off&iss.only=marketdata,securities&securities=${tick}`)
+      .then(j=>{
+        const sec={};rows(j,"securities").forEach(r=>sec[r.SECID]=r);
+        rows(j,"marketdata").forEach(r=>{
+          const s=sec[r.SECID]||{};
+          const cur=[r.LAST,r.LCURRENTPRICE,r.MARKETPRICE,s.PREVPRICE].find(v=>v!=null&&v>0);
+          S.md[r.SECID]={cur,time:r.UPDATETIME||r.TIME,prev:s.PREVPRICE,prevDate:s.PREVDATE};
+          if(r.UPDATETIME&&(!S.mdTime||r.UPDATETIME>S.mdTime))S.mdTime=r.UPDATETIME;
+        });
+      }).catch(e=>errs.push("акции: "+e.message)),
+    getJSON(`${ISS}/engines/stock/markets/index/securities.json?iss.meta=off&iss.only=marketdata&securities=IMOEX`)
+      .then(j=>{const r=rows(j,"marketdata")[0]||{};S.idx=[r.CURRENTVALUE,r.LASTVALUE].find(v=>v!=null&&v>0)||null})
+      .catch(e=>errs.push("индекс: "+e.message))
+  ]);
+  S.mdErr=errs.length?errs.join("; "):null;
+  S.fetchedAt=new Date();
+}
+let busy=false;
+async function refresh(full){
+  if(busy)return;busy=true;$("refresh").disabled=true;$("status").textContent="Обновляю…";
+  try{
+    if(full||Date.now()-S.slowAt>15*60*1000){await loadUK();await loadHistory();S.slowAt=Date.now()}
+    await loadMarket();
+  }finally{busy=false;$("refresh").disabled=false;render()}
+}
+
+/* ---------- model ---------- */
+function closeOf(t,date,key){const r=S.hist[t]&&S.hist[t][date];if(!r)return NaN;const v=r[key];return v!=null&&v>0?v:(r.CLOSE>0?r.CLOSE:NaN)}
+function tradingDays(){return Object.keys(S.idxHist).sort()}
+function fundMove(getR,rIdx,cash){
+  let wSum=0,move=0,missing=[];
+  S.weights.forEach(x=>{const w=x.w/100;wSum+=w;const r=getR(x.t);if(isFinite(r))move+=w*r;else{missing.push(x.n);move+=w*(isFinite(rIdx)?rIdx:0)}});
+  const rest=Math.max(0,1-wSum-cash);
+  if(!isFinite(rIdx))return{move:NaN,missing,rest};
+  return{move:move+rest*rIdx,missing,rest};
+}
+function settings(){
+  return{s:num($("spread").value)/100||0,thr:num($("thr").value)/100||0,cash:(num($("cash").value)||0)/100,
+    amt:num($("amount").value)||0,key:$("closeKey").value,ask:num($("ask").value)};
+}
+function navList(){
+  if(S.navs.length)return S.navs;
+  const n=num($("mNav").value),d=ru2iso($("mDate").value);
+  return isFinite(n)&&d?[{date:d,nav:n}]:[];
+}
+
+/* ---------- render ---------- */
+function render(){
+  const st=settings();
+  const navs=navList();
+  $("manualNav").hidden=!!S.navs.length;
+  // status
+  const t=S.fetchedAt?S.fetchedAt.toLocaleTimeString("ru-RU"):"—";
+  const errs=[S.navErr,S.histErr,S.mdErr].filter(Boolean);
+  $("status").textContent=`Обновлено ${t}`+(S.mdTime?` · Мосбиржа на ${S.mdTime.slice(0,5)}`:"")+(errs.length?" · ⚠ "+errs.join("; "):"");
+
+  const v=$("verdict");
+  if(!navs.length){setVerdict("none","Нет данных","",null,null,"Нет стоимости пая: сайт УК не прочитался. Введи её вручную в блоке «Котировка».");renderHold(null);renderModel(st);return}
+
+  const nav0=navs[0];
+  // which NAV is inside the quote
+  let navQ,dQ,ask,note;
+  if(isFinite(st.ask)&&st.ask>0){
+    ask=st.ask;navQ=ask/(1+st.s);
+    const match=navs.find(n=>Math.abs(n.nav-navQ)/n.nav<0.0012);
+    if(match){dQ=match.date;note=`Котировка совпадает со стоимостью пая за ${iso2ru(dQ)}.`}
+    else{
+      const next=tradingDays().find(d=>d>nav0.date);
+      dQ=next||null;
+      note=next?`В котировке стоимость пая ≈ ${fmt(navQ)} ₽. На сайте УК её ещё нет, считаю, что это стоимость за ${iso2ru(next)}.`
+               :`В котировке стоимость пая ≈ ${fmt(navQ)} ₽, но на сайте УК последняя — ${fmt(nav0.nav)} ₽ за ${iso2ru(nav0.date)}. Проверь, правильно ли введена котировка.`;
+    }
+  }else{
+    navQ=nav0.nav;dQ=nav0.date;ask=navQ*(1+st.s);
+    note=`Котировка рассчитана: стоимость пая ${fmt(navQ)} ₽ за ${iso2ru(dQ)} + ${fmt(st.s*100,1)}%. Если в Совкомбанке другая цена, введи её выше.`;
+  }
+  const bid0=navQ*(1-st.s);
+  $("quoteKv").innerHTML=[
+    ["Последняя стоимость пая на сайте УК",`${fmt(nav0.nav)} ₽ · ${iso2ru(nav0.date)}`],
+    ["Купить сейчас",fmt(ask)+" ₽"],["Продать сейчас",fmt(bid0)+" ₽"]
+  ].map(([a,b])=>`<span>${a}</span><span>${b}</span>`).join("");
+  $("quoteNote").textContent=note;
+
+  if(!dQ){setVerdict("none","Нет данных","",null,null,"Не понятно, за какую дату стоимость пая в котировке.");renderHold(null);renderModel(st);return}
+
+  const idxRef=S.idxHist[dQ];
+  const rIdx=isFinite(idxRef)&&S.idx?S.idx/idxRef-1:NaN;
+  const getR=tk=>{const ref=closeOf(tk,dQ,st.key);const c=S.md[tk]&&S.md[tk].cur;return isFinite(ref)&&c?c/ref-1:NaN};
+  const fm=fundMove(getR,rIdx,st.cash);
+  renderHold(dQ,st,rIdx,idxRef);
+  renderModel(st);
+
+  if(!isFinite(fm.move)){setVerdict("none","Нет данных","",null,null,`Нет цены закрытия индекса за ${iso2ru(dQ)}. Если этот день ещё не закончился на бирже, сравнивать пока не с чем.`);return}
+
+  const nav1=navQ*(1+fm.move), bid1=nav1*(1-st.s), ask1=nav1*(1+st.s);
+  const eBuy=bid1/ask-1, eSell=bid0/ask1-1;
+  let s="wait",word="Ждать",text;
+  if(eBuy>st.thr){s="buy";word="Докупать";text=`Бумаги фонда с ${iso2ru(dQ)} выросли на ${pct(fm.move)}, а котировка старая. После обновления пай должен продаваться примерно по ${fmt(bid1)} ₽.`}
+  else if(eSell>st.thr){s="sell";word="Выходить в рубли";text=`Бумаги фонда с ${iso2ru(dQ)} упали на ${pct(fm.move)}. Продать сейчас можно по ${fmt(bid0)} ₽, откупить после обновления примерно по ${fmt(ask1)} ₽.`}
+  else{text=`Движение ${pct(fm.move)} с ${iso2ru(dQ)} не покрывает спред ${fmt(st.s*200,1)}% за круг и порог ${fmt(st.thr*100,1)}%.`}
+  if(fm.missing.length)text+=` Нет цен по: ${fm.missing.join(", ")} — взял их как индекс.`;
+  setVerdict(s,word,"фонд "+pct(fm.move),{e:eBuy,r:st.amt*eBuy},{e:eSell,r:st.amt*eSell},text);
+}
+function setVerdict(s,word,move,buy,sell,text){
+  $("verdict").dataset.s=s;$("vWord").textContent=word;$("vMove").textContent=move;$("vText").textContent=text;
+  const put=(id,x)=>{const el=$(id);el.textContent=x?pct(x.e):"—";el.className=x?cls(x.e):"";$(id+"Rub").textContent=x?rub(x.r):""};
+  put("edgeBuy",buy);put("edgeSell",sell);
+}
+function renderHold(dQ,st,rIdx,idxRef){
+  const tb=$("holdBody");
+  if(!dQ){tb.innerHTML="";return}
+  const lines=S.weights.map(x=>{
+    const ref=closeOf(x.t,dQ,st.key),c=S.md[x.t]&&S.md[x.t].cur;const r=isFinite(ref)&&c?c/ref-1:NaN;
+    return `<tr><td>${x.n}<small>${x.t}</small></td><td>${fmt(x.w,1)}%</td><td>${fmtP(ref)}</td><td>${c?fmtP(c):"—"}</td><td class="${cls(r)}">${pct(r)}</td></tr>`;
+  });
+  const wSum=S.weights.reduce((a,x)=>a+x.w,0);
+  const rest=Math.max(0,100-wSum-st.cash*100);
+  lines.push(`<tr><td>Индекс МосБиржи<small>остальные бумаги</small></td><td>${fmt(rest,1)}%</td><td>${fmtP(idxRef)}</td><td>${S.idx?fmtP(S.idx):"—"}</td><td class="${cls(rIdx)}">${pct(rIdx)}</td></tr>`);
+  tb.innerHTML=lines.join("");
+  $("weightsNote").textContent=(S.wSource==="site"?"Состав и веса взяты с сайта УК":"Сайт УК не отдал состав, использую сохранённый")+` (на ${S.wDate}). «Было» — цена закрытия ${iso2ru(dQ)}.`;
+}
+function renderModel(st){
+  const navs=S.navs;const tb=$("modelBody");const out=[];let errSum=0,n=0;
+  for(let i=0;i<Math.min(6,navs.length-1);i++){
+    const d=navs[i].date,p=navs[i+1].date;
+    const fact=navs[i].nav/navs[i+1].nav-1;
+    const iD=S.idxHist[d],iP=S.idxHist[p];
+    const rIdx=isFinite(iD)&&isFinite(iP)?iD/iP-1:NaN;
+    const fm=fundMove(tk=>{const a=closeOf(tk,d,st.key),b=closeOf(tk,p,st.key);return a/b-1},rIdx,st.cash);
+    const err=fm.move-fact;
+    if(isFinite(err)){errSum+=Math.abs(err);n++}
+    out.push(`<tr><td>${iso2ru(d)}</td><td class="${cls(fm.move)}">${pct(fm.move)}</td><td class="${cls(fact)}">${pct(fact)}</td><td>${isFinite(err)?fmt(err*100)+"%":"—"}</td></tr>`);
+  }
+  tb.innerHTML=out.join("");
+  $("modelNote").textContent=n?`Средняя ошибка модели: ±${fmt(errSum/n*100)}%. Порог входа лучше держать не ниже этой величины.`:"Пока нет данных для проверки.";
+}
+
+/* ---------- settings persistence ---------- */
+const FIELDS=["ask","spread","thr","cash","amount","closeKey","every","mNav","mDate"];
+function save(){try{const o={};FIELDS.forEach(f=>o[f]=$(f).value);localStorage.setItem(SKEY,JSON.stringify(o))}catch(e){}}
+function load(){try{const o=JSON.parse(localStorage.getItem(SKEY)||"null");if(o)FIELDS.forEach(f=>{if(o[f]!=null)$(f).value=o[f]})}catch(e){}}
+
+let timer=null;
+function schedule(){clearInterval(timer);timer=setInterval(()=>{if(!document.hidden)refresh(false)},(num($("every").value)||60)*1000)}
+document.addEventListener("input",e=>{if(e.target.matches("input,select")){save();render();if(e.target.id==="every")schedule();if(e.target.id==="mNav"||e.target.id==="mDate"){S.slowAt=0}}});
+document.addEventListener("change",e=>{if(e.target.matches("select")){save();render();if(e.target.id==="every")schedule()}});
+$("refresh").addEventListener("click",()=>refresh(true));
+window.onAppResume=()=>refresh(false);
+load();schedule();refresh(true);
+</script>
+</body>
+</html>

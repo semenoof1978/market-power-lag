@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#1F1D18" android:pathData="M0,0h108v108h-108z" />
+    <!-- old quote: flat bronze step -->
+    <path android:fillColor="#00000000" android:strokeColor="#D6A463" android:strokeWidth="5"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M24,70 L48,70 L48,46 L84,46" />
+    <!-- market: green line running ahead -->
+    <path android:fillColor="#00000000" android:strokeColor="#5CC28E" android:strokeWidth="5"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M24,74 L38,62 L50,66 L66,44 L84,32" />
+</vector>
