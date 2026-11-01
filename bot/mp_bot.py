@@ -111,6 +111,10 @@ def rub(x):
     return f"{x:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
 
 
+def thr_txt():
+    return f"порог {THRESHOLD * 100:g}%".replace(".", ",")
+
+
 def fmt_pct(x):
     return f"{x * 100:.2f}".replace(".", ",") + "%"
 
@@ -431,6 +435,7 @@ def msg_body(c, now):
 
 def msg_signal(c, now):
     head = {"buy": "🟩🟩🟩 <b>ПОКУПАТЬ</b> 🟩🟩🟩", "sell": "🟥🟥🟥 <b>ПРОДАВАТЬ</b> 🟥🟥🟥"}[c["signal"]]
+    head += f" · {thr_txt()}"
     why = ("Расчётная стоимость пая выше цены покупки — пай отстаёт от рынка." if c["signal"] == "buy"
            else "Расчётная стоимость пая ниже цены продажи — пай ещё не учёл падение.")
     return (f"{head}\n{why}\n\n{msg_body(c, now)}\n\n"
@@ -440,7 +445,7 @@ def msg_signal(c, now):
 def msg_summary(c, now):
     state = {"buy": "🟩 ПОКУПАТЬ", "sell": "🟥 ПРОДАВАТЬ", "none": "⬜ ДЕРЖАТЬ"}[c["signal"]]
     tip = "" if c["q_kind"] in ("user", "exchange") else "\n\nДля точного расчёта пришли цены из приложения: «купить по 154,83» и «продать по 153,29»"
-    return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state}\n\n"
+    return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state} · {thr_txt()}\n\n"
             f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{c.get('fund_note', '')}{tip}")
 
 
@@ -491,7 +496,7 @@ def signal_card(c, now):
         d.text((80, y), label, font=small, fill=soft, anchor="lm")
         d.text((W - 80, y), val, font=font("DejaVuSans-Bold.ttf", 42), fill=fg, anchor="rm")
         y += 66
-    d.text((W / 2, H - 38), f"Маркет Пауэр · {now.strftime('%d.%m %H:%M')} МСК", font=font("DejaVuSans.ttf", 30), fill=soft, anchor="mm")
+    d.text((W / 2, H - 38), f"Маркет Пауэр · {thr_txt()} · {now.strftime('%d.%m %H:%M')} МСК", font=font("DejaVuSans.ttf", 30), fill=soft, anchor="mm")
     import io
     out = io.BytesIO()
     img.save(out, "PNG")
@@ -724,7 +729,7 @@ def main():
         state["signal_at"] = now.isoformat()
         signal_sent = True
     elif c["signal"] == "none" and last != "none":
-        send_signal(state, c, now, f"⬜ <b>ДЕРЖАТЬ</b>: сигнал «{'Покупать' if last == 'buy' else 'Продавать'}» больше не действует.\n\n{msg_body(c, now)}")
+        send_signal(state, c, now, f"⬜ <b>ДЕРЖАТЬ</b>: сигнал «{'Покупать' if last == 'buy' else 'Продавать'}» больше не действует · {thr_txt()}.\n\n{msg_body(c, now)}")
     state["signal"] = c["signal"]
 
     # ---- сводка
