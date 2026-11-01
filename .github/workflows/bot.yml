@@ -1,0 +1,49 @@
+name: Bot
+
+on:
+  schedule:
+    # каждый час в :07, с 07:07 до 00:07 МСК (время в cron — UTC)
+    - cron: '7 4-21 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'summary — прислать сводку сейчас, auto — обычная проверка'
+        default: summary
+  push:
+    branches: [main]
+    paths: ['bot/**', '.github/workflows/bot.yml']
+
+concurrency:
+  group: bot
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore bot memory
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
+
+      - name: Run bot
+        run: mkdir -p state && python3 bot/mp_bot.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode || 'summary' }}
+          THRESHOLD: '3'
+          SPREAD: '0.5'
+          SUMMARY_HOUR: '19'
+
+      - name: Save bot memory
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: bot-state-${{ github.run_id }}
