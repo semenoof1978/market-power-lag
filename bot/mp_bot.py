@@ -443,7 +443,9 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
         base_d, base_nav, base_src = quote["date"], quote["nav"], q_src
     else:
         base_d, base_nav, base_src = d0, nav0, "site"
-    move_now, missing = move_between(base_d, lambda t: cur.get(t), idx_now, tr_now)
+    # MCFTRR на Мосбирже считается раз в день (в течение дня стоит на вчерашнем закрытии) —
+    # для текущих цен остаток портфеля считаем по IMOEX, MCFTRR — только между закрытиями
+    move_now, missing = move_between(base_d, lambda t: cur.get(t), idx_now, None)
     calc = base_nav * (1 + move_now) * fee(base_d, today)
 
     # --- котировка Совкомбанка
