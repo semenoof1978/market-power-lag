@@ -31,7 +31,7 @@ def hist(t):
 
 
 H = {t: hist(t) for t, _, _ in weights}
-days = sorted(set.intersection(*[set(v) for v in H.values() if len(v) > 200]))
+days = sorted(H["SBER"])
 print("дней:", len(days), days[0], "…", days[-1])
 W = sum(w for _, _, w in weights)
 
@@ -57,6 +57,10 @@ for d, nd in zip(days, days[1:]):
     if None not in (eve, to_open, to_close):
         rows.append((d, eve, to_open, to_close))
 
+for y in ("2024", "2025", "2026"):
+    ys = [r for r in rows if r[0].startswith(y)]
+    if ys:
+        print(f"{y}: дней {len(ys)}, вечер |движение|>1%: {sum(1 for r in ys if abs(r[1]) > 0.01)}, >2%: {sum(1 for r in ys if abs(r[1]) > 0.02)}")
 print("\nКрупнейшие вечерние движения (вечерняя сессия к закрытию основной):")
 for d, e, o, c in sorted(rows, key=lambda r: -abs(r[1]))[:15]:
     print(f"  {d}  вечер {e*100:+5.2f}%  к открытию след. дня {o*100:+5.2f}%  к закрытию след. дня {c*100:+5.2f}%")
