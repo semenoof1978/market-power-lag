@@ -47,6 +47,7 @@ jobs:
           THRESHOLD: '1.5'
           SPREAD: '0.5'
           SUMMARY_HOUR: '23'
+          DEBUG: '1'
 
       - name: Keep schedule alive
         # GitHub выключает расписание в публичном репозитории после 60 дней без коммитов
