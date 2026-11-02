@@ -113,13 +113,38 @@ def rub(x):
     return f"{x:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
 
 
-def in_session(now):
-    """Идут ли торги акциями на Мосбирже (с запасом 15 минут на задержку данных).
-    Будни 06:50–23:50, выходные 09:50–19:00 (расписание с 14.09.2026)."""
+MAIN_CLOSE = 19 * 60          # конец основной сессии (с 14.09.2026; раньше 18:50)
+
+
+def bank_live(now):
+    """Совкомбанк обновляет цену пая, пока идёт утренняя/основная сессия (будни 06:50–19:00, выходные 09:50–19:00).
+    После закрытия основной сессии цена замораживается до утра — в это окно и работает лаг."""
     m = now.hour * 60 + now.minute
-    if now.weekday() < 5:
-        return 6 * 60 + 50 <= m < 24 * 60          # 23:50 + 15 мин задержки ≈ до полуночи
-    return 9 * 60 + 50 <= m < 19 * 60 + 15
+    start = 6 * 60 + 50 if now.weekday() < 5 else 9 * 60 + 50
+    return start <= m < MAIN_CLOSE
+
+
+def in_session(now):
+    """Идёт вечерняя сессия (цены ещё меняются, сигнал предварительный): будни 19:00–23:50 + 15 мин задержки данных."""
+    m = now.hour * 60 + now.minute
+    return now.weekday() < 5 and MAIN_CLOSE <= m < 24 * 60 + 5
+
+
+def last_main_close(now):
+    """Момент последнего закрытия основной сессии, после которого цена банка заморожена."""
+    d = now.replace(hour=MAIN_CLOSE // 60, minute=MAIN_CLOSE % 60, second=0, microsecond=0)
+    return d if now >= d else d - timedelta(days=1)
+
+
+def next_live_start(dt):
+    """Когда банк снова начнёт обновлять цену после момента dt."""
+    d = dt
+    for _ in range(4):
+        start = d.replace(hour=6 if d.weekday() < 5 else 9, minute=50, second=0, microsecond=0)
+        if start > dt:
+            return start
+        d = (d + timedelta(days=1)).replace(hour=0, minute=0)
+    return dt + timedelta(days=1)
 
 
 def money(x):
@@ -224,13 +249,18 @@ def iss_json(url):
         raise SourceError("Мосбиржа", f"нет связи ({type(e).__name__})")
 
 
+LEGAL = {}      # закрытия основной сессии по дням: {тикер: {дата: цена}}
+LCLOSE = {}     # закрытие основной сессии текущего торгового дня из marketdata
+
+
 def load_history(tickers, frm, till):
     hist = {}
     for t in tickers:
         j = iss_json(f"{ISS}/history/engines/stock/markets/shares/boards/TQBR/securities/{t}.json"
                      f"?iss.meta=off&iss.only=history&from={frm}&till={till}&history.columns=TRADEDATE,CLOSE,LEGALCLOSEPRICE")
-        hist[t] = {r["TRADEDATE"]: (r["CLOSE"] if ok(r.get("CLOSE")) else r.get("LEGALCLOSEPRICE"))
-                   for r in iss_rows(j, "history")}
+        rows = iss_rows(j, "history")
+        hist[t] = {r["TRADEDATE"]: (r["CLOSE"] if ok(r.get("CLOSE")) else r.get("LEGALCLOSEPRICE")) for r in rows}
+        LEGAL[t] = {r["TRADEDATE"]: r["LEGALCLOSEPRICE"] for r in rows if ok(r.get("LEGALCLOSEPRICE"))}
     j = iss_json(f"{ISS}/history/engines/stock/markets/index/securities/IMOEX.json"
                  f"?iss.meta=off&iss.only=history&from={frm}&till={till}&history.columns=TRADEDATE,CLOSE")
     idx = {r["TRADEDATE"]: r["CLOSE"] for r in iss_rows(j, "history") if ok(r.get("CLOSE"))}
@@ -248,12 +278,15 @@ def load_history(tickers, frm, till):
 def load_market(tickers):
     j = iss_json(f"{ISS}/engines/stock/markets/shares/boards/TQBR/securities.json"
                  f"?iss.meta=off&iss.only=marketdata,securities&securities={','.join(tickers)}")
+    LCLOSE.clear()
     sec = {r["SECID"]: r for r in iss_rows(j, "securities")}
     cur, upd = {}, None
     for r in iss_rows(j, "marketdata"):
         s = sec.get(r["SECID"], {})
         v = next((x for x in (r.get("LAST"), r.get("LCURRENTPRICE"), r.get("MARKETPRICE"), s.get("PREVPRICE")) if ok(x)), None)
         cur[r["SECID"]] = v
+        if ok(r.get("LCLOSEPRICE")):
+            LCLOSE[r["SECID"]] = r["LCLOSEPRICE"]
         if r.get("UPDATETIME") and (upd is None or r["UPDATETIME"] > upd):
             upd = r["UPDATETIME"]
     j = iss_json(f"{ISS}/engines/stock/markets/index/securities.json?iss.meta=off&iss.only=marketdata&securities=IMOEX,MCFTRR")
@@ -302,6 +335,17 @@ def load_dividends(tickers, state, now):
         data = {t: [tuple(x) for x in v] for t, v in cache["data"].items()}
     print("dividends loaded for", len(data), "tickers")
     return data
+
+
+def idx_at_close(day):
+    """IMOEX на закрытии основной сессии дня day (по 10-минутным свечам)."""
+    try:
+        j = iss_json(f"{ISS}/engines/stock/markets/index/securities/IMOEX/candles.json"
+                     f"?iss.meta=off&interval=10&from={day}&till={day}")
+        rows = [r for r in iss_rows(j, "candles") if r.get("begin", "") < f"{day} {MAIN_CLOSE // 60:02d}:{MAIN_CLOSE % 60:02d}"]
+        return rows[-1]["close"] if rows else None
+    except SourceError:
+        return None
 
 
 FUND_ISIN = "RU000A107G30"
@@ -404,66 +448,81 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
     def fee(a, b):
         return 1 - FUND_FEE * (date.fromisoformat(b) - date.fromisoformat(a)).days / 365
 
-    # --- котировка пользователя: определить, за какую дату в ней стоимость пая
-    def nav_of(b_, s_):
-        if b_ and s_:
-            return (b_ + s_) / 2
-        return b_ / (1 + spread) if b_ else s_ / (1 - spread)
+    # ================= логика лага (подтверждена сделками 2025 года и ценами банка 02.11.2026) =================
+    # Днём Совкомбанк обновляет цену пая вслед за рынком — лага нет.
+    # После закрытия основной сессии цена замораживается до утра, а вечерняя сессия продолжает двигать акции.
+    # Сигнал = движение акций фонда на вечерней сессии относительно закрытия основной.
+    live = bank_live(now)
+    close_at = last_main_close(now)
+    D = close_at.date().isoformat()
 
-    def date_of(nav_):
-        # сверяем только с последними тремя опубликованными стоимостями пая, а не со всей историей
-        match = next((d for d, n in navs[:3] if abs(n - nav_) / n < 0.0012), None)
-        if match:
-            return match
-        later = [d for d in trading if d > d0]
-        return later[0] if later else (trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0)
+    def same_window(at_iso):
+        if not at_iso:
+            return False
+        at = datetime.fromisoformat(at_iso)
+        if live:
+            return bank_live(at) and (now - at).total_seconds() < 3600
+        return at >= close_at
 
+    # --- живая расчётная стоимость пая: от последней стоимости на сайте УК по текущим ценам
+    move_now, missing = move_between(d0, lambda t: cur.get(t), idx_now, None)
+    calc_live = nav0 * (1 + move_now) * fee(d0, today)
+
+    # --- цены, присланные пользователем
     quote_status = None
     if quote and quote.get("new"):
         b, sl, prev = quote.get("buy"), quote.get("sell"), quote.get("prev") or {}
-        q_d = date_of(nav_of(b, sl))
-        if prev.get("date") == q_d:          # вторая цена из прошлого сообщения того же дня
+        if prev and same_window(prev.get("at")):          # вторая цена из прошлого сообщения того же окна
             b, sl = b or prev.get("buy"), sl or prev.get("sell")
-        q_nav = nav_of(b, sl)
         spr = (b - sl) / (b + sl) if b and sl else spread
-        quote = {"buy": b, "sell": sl, "nav": round(q_nav, 4), "date": q_d, "spread": spr}
+        mid = (b + sl) / 2 if b and sl else (b / (1 + spr) if b else sl / (1 - spr))
+        quote = {"buy": b, "sell": sl, "mid": round(mid, 4), "spread": spr, "at": now.isoformat()}
         quote_status = "new"
-    expected = trading[-QUOTE_LAG] if len(trading) >= QUOTE_LAG else d0
-    if quote and quote_status != "new" and quote["date"] < expected:
-        quote, quote_status = None, "expired"   # прошёл новый торговый день — котировка обновилась
-    q_src = "user" if quote else None
-    if not quote and exq:                        # цены маркет-мейкера с Мосбиржи
-        b, sl = exq["offer"], exq["bid"]
-        q_nav = nav_of(b, sl)
-        quote = {"buy": b, "sell": sl, "nav": round(q_nav, 4), "date": date_of(q_nav), "spread": (b - sl) / (b + sl)}
-        q_src = "exchange"
-
-    # --- база расчёта: котировка пользователя, если есть, иначе сайт УК
-    if quote and quote["date"] in idx_hist:
-        base_d, base_nav, base_src = quote["date"], quote["nav"], q_src
-    else:
-        base_d, base_nav, base_src = d0, nav0, "site"
-    # MCFTRR на Мосбирже считается раз в день (в течение дня стоит на вчерашнем закрытии) —
-    # для текущих цен остаток портфеля считаем по IMOEX, MCFTRR — только между закрытиями
-    move_now, missing = move_between(base_d, lambda t: cur.get(t), idx_now, None)
-    calc = base_nav * (1 + move_now) * fee(base_d, today)
-
-    # --- котировка Совкомбанка
+    elif quote and not same_window(quote.get("at")):
+        quote, quote_status = None, "expired"
     s_eff = quote["spread"] if quote else spread
-    if quote:
-        q_date, q_nav, q_kind = quote["date"], quote["nav"], q_src
-        ask = quote["buy"] or q_nav * (1 + s_eff)
-        bid = quote["sell"] or q_nav * (1 - s_eff)
+
+    eve = None
+    if live:
+        phase, calc = "live", calc_live
+        ref = quote["mid"] if quote else calc_live
+        q_kind = "user" if quote else "live"
     else:
-        q_date = expected
-        if q_date in nav_map:
-            q_nav, q_kind = nav_map[q_date], "site"
-        elif q_date > d0 and q_date in idx_hist:
-            mv, _ = move_between(d0, lambda t: hist.get(t, {}).get(q_date), idx_hist[q_date], tr_hist.get(q_date), q_date)
-            q_nav, q_kind = nav0 * (1 + mv) * fee(d0, q_date), "est"
+        phase = "evening" if in_session(now) else "night"
+
+        def main_close(t):
+            v = LCLOSE.get(t) if D == today or not LEGAL.get(t, {}).get(D) else None
+            return v if ok(v) else LEGAL.get(t, {}).get(D)
+
+        tot, ws = 0.0, 0.0
+        for t, _, w in weights:
+            pa, pb = main_close(t), cur.get(t)
+            if ok(pa) and ok(pb) and abs(pb / pa - 1) < 0.2:
+                tot += w * (pb / pa - 1)
+                ws += w
+        eve = tot / ws if ws >= 40 else None             # нужна хотя бы половина топ-10 по весу
+
+        if quote:
+            ref, q_kind = quote["mid"], "user"
         else:
-            q_date, q_nav, q_kind = d0, nav0, "site"
-        ask, bid = q_nav * (1 + spread), q_nav * (1 - spread)
+            # цена банка ≈ стоимость пая по ценам закрытия основной сессии
+            ic = idx_at_close(D)
+            if D > d0 and ic and all(ok(main_close(t)) for t, _, _ in weights[:5]):
+                mv, _ = move_between(d0, main_close, ic, None, D)
+                ref = nav0 * (1 + mv) * fee(d0, D)
+            else:
+                ref = calc_live / (1 + (eve or 0))
+            q_kind = "est"
+        calc = ref * (1 + (eve or 0))
+
+    if quote:
+        ask = quote.get("buy") or ref * (1 + s_eff)
+        bid = quote.get("sell") or ref * (1 - s_eff)
+    else:
+        ask, bid = ref * (1 + s_eff), ref * (1 - s_eff)
+    q_date, q_nav, q_src = D, ref, q_kind
+    base_d, base_nav, base_src = (D, ref, q_kind) if not live else (d0, nav0, "site")
+    expected = D
 
     check = None
     if len(navs) >= 2:
@@ -472,17 +531,18 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
             mv, _ = move_between(pp, lambda t: hist.get(t, {}).get(dd), idx_hist[dd], tr_hist.get(dd), dd)
             check = {"date": dd, "model": (1 + mv) * fee(pp, dd) - 1, "fact": nd / npp - 1}
 
-    edge_buy = calc * (1 - s_eff) / ask - 1      # купить сейчас, продать после обновления
+    edge_buy = calc * (1 - s_eff) / ask - 1      # купить сейчас, продать после обновления цены банка
     edge_sell = bid / (calc * (1 + s_eff)) - 1   # продать сейчас, откупить после обновления
-    signal = "buy" if edge_buy >= THRESHOLD else "sell" if edge_sell >= THRESHOLD else "none"
+    signal = "none" if live else ("buy" if edge_buy >= THRESHOLD else "sell" if edge_sell >= THRESHOLD else "none")
     return {
         "signal": signal, "calc": calc, "move": move_now, "missing": missing,
         "base_d": base_d, "base_nav": base_nav, "base_src": base_src,
         "d0": d0, "nav0": nav0, "q_date": q_date, "q_nav": q_nav, "q_kind": q_kind,
         "ask": ask, "bid": bid, "edge_buy": edge_buy, "edge_sell": edge_sell,
         "upd": upd, "w_src": w_src, "w_date": w_date,
-        "quote": quote if q_src == "user" else None, "quote_status": quote_status, "spread": s_eff,
+        "quote": quote, "quote_status": quote_status, "spread": s_eff,
         "q_view": quote, "exq": exq, "check": check, "expected": expected,
+        "phase": phase, "eve": eve, "close_at": close_at.isoformat(),
     }
 
 
@@ -525,10 +585,10 @@ def msg_body(c, now):
 def msg_signal(c, now):
     head = {"buy": "🟩🟩🟩 <b>ПОКУПАТЬ</b> 🟩🟩🟩", "sell": "🟥🟥🟥 <b>ПРОДАВАТЬ</b> 🟥🟥🟥"}[c["signal"]]
     head += f" · {thr_txt()}"
-    why = ("Расчётная стоимость пая выше цены покупки — пай отстаёт от рынка." if c["signal"] == "buy"
-           else "Расчётная стоимость пая ниже цены продажи — пай ещё не учёл падение.")
+    why = ("Акции фонда выросли на вечерней сессии, а цена пая в банке заморожена с 19:00." if c["signal"] == "buy"
+           else "Акции фонда упали на вечерней сессии, а цена пая в банке заморожена с 19:00.")
     return (f"{head}\n{why}\n\n{msg_body(c, now)}\n\n"
-            f"Сигнал верен, если цены удержатся до закрытия дня. Проверь котировку в приложении перед сделкой.")
+            f"Утром банк обновит цену. Проверь цену в приложении перед сделкой.")
 
 
 def msg_summary(c, now):
@@ -568,7 +628,8 @@ def signal_card(c, now, notes=(), word=None, sub=None, color=None):
     while d.textlength(word, font=big) > W - 100 and big.size > 60:
         big = font("DejaVuSans-Bold.ttf", big.size - 10)
     d.text((W / 2, 150), word, font=big, fill=fg, anchor="mm")
-    tag = "ПРЕДВАРИТЕЛЬНО · идут торги" if in_session(now) else "ПОДТВЕРЖДЕНО · торги закрыты"
+    tag = {"live": "БАНК ОБНОВЛЯЕТ ЦЕНУ · основная сессия",
+           "evening": "ПРЕДВАРИТЕЛЬНО · идёт вечерняя сессия"}.get(c.get("phase"), "ПОДТВЕРЖДЕНО · вечерняя сессия закрыта")
     d.text((W / 2, 46), tag, font=font("DejaVuSans-Bold.ttf", 30), fill=soft, anchor="mm")
     if sub:
         d.text((W / 2, 275), sub, font=font("DejaVuSans-Bold.ttf", 44), fill=fg, anchor="mm")
@@ -579,7 +640,7 @@ def signal_card(c, now, notes=(), word=None, sub=None, color=None):
         edge = c["edge_buy"] if buy else c["edge_sell"]
         d.text((W / 2, 275), f"выгода {pct(edge)}", font=mid, fill=fg, anchor="mm")
     d.line((80, 345, W - 80, 345), fill=soft, width=3)
-    src = {"user": " (твои)", "exchange": " (биржа)"}.get(c["q_kind"], " (оценка)")
+    src = {"user": " (твои)", "live": " (≈ рынок)"}.get(c["q_kind"], " (оценка)")
     rows = [("Расчётная стоимость пая", rub(c["calc"])),
             ("Купить по" + src, rub(c["ask"])),
             ("Продать по" + src, rub(c["bid"])),
@@ -656,8 +717,11 @@ HELP_TEXT = ("📖 Команды (ответ — при ближайшей пр
              "• «помощь» — этот список\n\n"
              "По-английски тоже можно: status, buy at 154.83 sell at 151.78, reset, bought 100 at 154.83, "
              "sold 100 at 151.78, trades, help.\n\n"
-             "Карточки: 🟩 ПОКУПАТЬ / 🟥 ПРОДАВАТЬ — выгода выше порога; ⬜ ДЕРЖАТЬ — ничего не делать. "
-             "ПРЕДВАРИТЕЛЬНО — идут торги, сигнал может исчезнуть; ПОДТВЕРЖДЕНО — торги закрыты.")
+             "Как работает: днём (до 19:00) банк обновляет цену пая вслед за рынком — сигналов нет. "
+             "После 19:00 цена в банке заморожена до утра, а вечерняя сессия двигает акции. "
+             "🟩 ПОКУПАТЬ / 🟥 ПРОДАВАТЬ — вечернее движение даёт выгоду выше порога; ⬜ ДЕРЖАТЬ — ничего не делать. "
+             "ПРЕДВАРИТЕЛЬНО — вечерняя сессия идёт; ПОДТВЕРЖДЕНО — закрыта (после 23:50). "
+             "Цены «купить по … продать по …» присылай после 19:00 — тогда расчёт точный.")
 
 
 def incoming(state):
@@ -763,16 +827,23 @@ def main():
                     "• сам проверяет точность модели и учитывает дивиденды\n"
                     "• утром в будни напомнит прислать цены\n"
                     "• «помощь» — все команды")
-    state["v2_notice"] = state["v3_notice"] = state["v4_notice"] = True
+    elif not state.get("v5_notice"):
+        send(state, "🆕 Бот переделан под реальную схему:\n"
+                    "• днём Совкомбанк обновляет цену пая вслед за рынком — сигналов нет;\n"
+                    "• после 19:00 цена в банке заморожена до утра, а вечерняя сессия двигает акции — "
+                    "сигнал ПОКУПАТЬ/ПРОДАВАТЬ, если вечернее движение даёт выгоду выше порога;\n"
+                    "• сводка — в 23:00, напоминание закрыть круг — утром, когда банк обновит цену;\n"
+                    "• цены «купить по … продать по …» присылай после 19:00.\n"
+                    "Именно так работали твои сделки 09.04, 06.08 и 16.10.2025.")
+    state["v2_notice"] = state["v3_notice"] = state["v4_notice"] = state["v5_notice"] = True
     if inc["help"]:
         send(state, HELP_TEXT)
     if inc["quote_off"]:
         state.pop("quote", None)
         send(state, "Ок, цены снова оцениваю сам.")
     stored = state.get("quote")
-    if stored and "price" in stored:                 # старый формат «котировка»
-        stored = ({"new": True, "buy": stored["price"]} if "date" not in stored else
-                  {"buy": stored["price"], "sell": None, "nav": stored["nav"], "date": stored["date"], "spread": SPREAD})
+    if stored and not stored.get("new") and "at" not in stored:   # старые форматы — больше не действуют
+        stored = None
     if stored and stored.get("new") and not (inc["buy"] or inc["sell"]):
         inc["buy"], inc["sell"] = stored.get("buy"), stored.get("sell")   # не обработанные из-за сбоя
         stored = None
@@ -843,13 +914,12 @@ def main():
             ". Пришли и «" + ("продать" if qq.get("buy") else "купить") + " по …»")
         send(state, f"✅ Цены приняты: {', '.join(p for p in parts if p)}{more}")
         asked = True
-    elif c["quote_status"] == "expired":
+    elif c["quote_status"] == "expired" or not c["quote"]:
         state.pop("quote", None)
-        send(state, "ℹ️ Твои цены устарели: прошёл новый торговый день. Снова оцениваю их сам. "
-                    "Пришли новые: «купить по …» и «продать по …»")
     elif c["quote"]:
         state["quote"] = c["quote"]
     print("check ok, signal:", c["signal"])
+    if os.environ.get("DEBUG"): print({k: c.get(k) for k in ("phase","eve","calc","ask","bid","edge_buy","edge_sell","q_kind","spread")})
     today = now.date().isoformat()
 
     # ---- самопроверка модели по новой стоимости пая
@@ -911,10 +981,10 @@ def main():
         send(state, f"📒 Открытые круги:\n{body}\n\nЗакрыто кругов: {len(state.get('closed', []))}, "
                     f"итого: {money(state.get('realized', 0))}")
 
-    # ---- напоминание закрыть круг: цена в банке обновилась (в котировке уже более свежая стоимость пая)
-    if now.hour >= 10:
+    # ---- напоминание закрыть круг: банк снова обновляет цену (наступила сессия после сделки)
+    if c["phase"] == "live":
         for r in rounds:
-            if r.get("reminded") or not c.get("expected") or c["expected"] <= r["date"]:
+            if r.get("reminded") or now < next_live_start(datetime.fromisoformat(r["at"])) + timedelta(minutes=20):
                 continue
             if r["side"] == "long":
                 gain = r["qty"] * (c["bid"] - r["price"])
@@ -928,11 +998,11 @@ def main():
                         word=word, color=color, sub=f"закрыть круг · {gtxt}")
             r["reminded"] = True
 
-    # ---- утреннее напоминание прислать цены
-    if now.weekday() < 5 and (9 * 60 + 30) <= now.hour * 60 + now.minute < 12 * 60 \
+    # ---- напоминание прислать цены: вечером, если рынок заметно сдвинулся после 19:00
+    if c["phase"] == "evening" and c.get("eve") is not None and abs(c["eve"]) >= 0.01 \
             and state.get("remind_date") != today and c["q_kind"] != "user":
-        send(state, "☀️ Пришли цены пая из приложения Совкомбанка, например: «купить по 154,83 продать по 151,78». "
-                    "Так расчёт на сегодня будет точным.")
+        send(state, f"🌙 Акции фонда на вечерней сессии {pct(c['eve'])}. Пришли цены пая из приложения "
+                    "(«купить по … продать по …») — посчитаю выгоду точно.")
         state["remind_date"] = today
 
     # ---- сигнал
