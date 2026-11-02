@@ -337,6 +337,28 @@ def load_dividends(tickers, state, now):
     return data
 
 
+CLOSE_CACHE = {}   # {"day": D, "px": {тикер: цена закрытия основной сессии}} — из 10-минутных свечей
+
+
+def share_at_close(t, day):
+    """Цена бумаги на закрытии основной сессии дня day по 10-минутным свечам (когда LCLOSEPRICE ещё нет)."""
+    if CLOSE_CACHE.get("day") != day:
+        CLOSE_CACHE.clear()
+        CLOSE_CACHE.update(day=day, px={})
+    if t in CLOSE_CACHE["px"]:
+        return CLOSE_CACHE["px"][t]
+    try:
+        j = iss_json(f"{ISS}/engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json"
+                     f"?iss.meta=off&interval=10&from={day}&till={day}")
+        rows = [r for r in iss_rows(j, "candles") if r.get("begin", "") < f"{day} {MAIN_CLOSE // 60:02d}:{MAIN_CLOSE % 60:02d}"]
+        v = rows[-1]["close"] if rows else None
+    except SourceError:
+        v = None
+    if ok(v):
+        CLOSE_CACHE["px"][t] = v
+    return v
+
+
 def idx_at_close(day):
     """IMOEX на закрытии основной сессии дня day (по 10-минутным свечам)."""
     try:
@@ -492,7 +514,8 @@ def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
 
         def main_close(t):
             v = LCLOSE.get(t) if D == today or not LEGAL.get(t, {}).get(D) else None
-            return v if ok(v) else LEGAL.get(t, {}).get(D)
+            v = v if ok(v) else LEGAL.get(t, {}).get(D)
+            return v if ok(v) else share_at_close(t, D)
 
         tot, ws = 0.0, 0.0
         for t, _, w in weights:
@@ -792,6 +815,8 @@ def main():
     state = load_state()
     if CHAT_ID:
         state["chat_id"] = int(CHAT_ID) if CHAT_ID.lstrip("-").isdigit() else CHAT_ID
+    CLOSE_CACHE.clear()
+    CLOSE_CACHE.update(state.get("close_cache") or {})
     inc = incoming(state)
     asked = inc["asked"]
     if not state.get("chat_id"):
@@ -1030,6 +1055,7 @@ def main():
     if due:
         state["summary_date"] = today
 
+    state["close_cache"] = dict(CLOSE_CACHE)
     save_state(state)
     return 0
 
