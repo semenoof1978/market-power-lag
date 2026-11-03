@@ -44,6 +44,7 @@ FUND_FEE = env_float("FUND_FEE", 2.95) / 100    # годовые расходы 
 QUOTE_LAG = int(env_float("QUOTE_LAG_DAYS", 1)) # котировка = стоимость пая за N-й торговый день назад
 SUMMARY_HOUR = int(env_float("SUMMARY_HOUR", 19))
 PING_MOVE = env_float("PING_MOVE", 1.5) / 100   # пуш «пришли свежие цены», если расчётная цена ушла на столько
+PING_STEP = env_float("PING_STEP", 0.5) / 100    # повторный пуш — только если цена ушла ещё на столько дальше
 PING_EVERY_MIN = 10                              # проверяем при каждом запуске (cron — каждые 10 минут, т.е. не реже 15)
 REPEAT_HOURS = 3        # повтор действующего сигнала не чаще
 FAILS_TO_ALERT = 3      # подряд неудачных проверок (по 10 минут) до оповещения о связи
@@ -955,18 +956,28 @@ def main():
     ref = state.get("ping_ref") or {}
     if c["quote_status"] == "new" or not ok(ref.get("calc")):
         state["ping_ref"] = {"calc": round(c["calc"], 4), "at": now.isoformat()}   # точка отсчёта — свежие цены
+        state["ping_alert"] = None                                                  # флаг сброшен твоими ценами
     else:
         last_chk = state.get("ping_check_at")
         if not last_chk or (now - datetime.fromisoformat(last_chk)).total_seconds() >= (PING_EVERY_MIN - 1) * 60:
             state["ping_check_at"] = now.isoformat()
             mv = c["calc"] / ref["calc"] - 1
-            if abs(mv) >= PING_MOVE:
+            al = state.get("ping_alert")          # {"dir": ±1, "mv": движение на момент последнего пуша}
+            d = 1 if mv > 0 else -1
+            if not al:
+                fire = abs(mv) >= PING_MOVE
+            else:                                 # пуш уже был: повтор только если ушло ещё на PING_STEP дальше
+                fire = d == al["dir"] and abs(mv) >= abs(al["mv"]) + PING_STEP
+                if d != al["dir"] and abs(mv) >= PING_MOVE:
+                    fire = True                   # ушло в другую сторону за порог — это новое событие
+            if fire:
                 since = datetime.fromisoformat(ref["at"]).strftime("%d.%m %H:%M")
+                again = "ещё дальше: " if al and d == al["dir"] else ""
                 send(state, f"🔔 <b>Расчетная цена пая ушла на {fmt_pct(abs(mv))} от последнего значения! "
                             f"Пришли свежие цены из Совкомбанка</b>\n"
-                            f"Было {rub(ref['calc'])} ({since}), сейчас {rub(c['calc'])} ({pct(mv)}).\n"
+                            f"Было {rub(ref['calc'])} ({since}), сейчас {rub(c['calc'])} ({again}{pct(mv)}).\n"
                             f"Ответь: «купить по … продать по …»")
-                state["ping_ref"] = {"calc": round(c["calc"], 4), "at": now.isoformat()}
+                state["ping_alert"] = {"dir": d, "mv": round(mv, 5)}
 
     # ---- самопроверка модели по новой стоимости пая
     ck = c.get("check")
