@@ -43,6 +43,8 @@ SPREAD = env_float("SPREAD", 0.5) / 100         # маркет-мейкер: +0,
 FUND_FEE = env_float("FUND_FEE", 2.95) / 100    # годовые расходы фонда (УК 2,5% + депозитарий до 0,45%)
 QUOTE_LAG = int(env_float("QUOTE_LAG_DAYS", 1)) # котировка = стоимость пая за N-й торговый день назад
 SUMMARY_HOUR = int(env_float("SUMMARY_HOUR", 19))
+PING_MOVE = env_float("PING_MOVE", 1.5) / 100   # пуш «пришли свежие цены», если расчётная цена ушла на столько
+PING_EVERY_MIN = 10                              # проверяем при каждом запуске (cron — каждые 10 минут, т.е. не реже 15)
 REPEAT_HOURS = 3        # повтор действующего сигнала не чаще
 FAILS_TO_ALERT = 3      # подряд неудачных проверок (по 10 минут) до оповещения о связи
 REMIND_EVERY = 18       # напоминание «связи всё ещё нет» — раз в 3 часа
@@ -738,6 +740,8 @@ HELP_TEXT = ("📖 Команды (ответ — при ближайшей пр
              "• «купил 100 по 154,83» / «продал 100 по 151,78» — записать сделку; без цены — по текущей\n"
              "• «сделки» — открытые круги и итог\n"
              "• «помощь» — этот список\n\n"
+             "🔔 Каждые 15 минут бот сверяет расчётную цену пая с последним значением (после твоих цен или прошлого "
+             "напоминания). Если она ушла на 1,5% и больше — пришлёт напоминание прислать свежие цены.\n\n"
              "По-английски тоже можно: status, buy at 154.83 sell at 151.78, reset, bought 100 at 154.83, "
              "sold 100 at 151.78, trades, help.\n\n"
              "Как работает: днём (до 19:00) банк обновляет цену пая вслед за рынком — сигналов нет. "
@@ -946,6 +950,23 @@ def main():
     print("check ok, signal:", c["signal"])
     if os.environ.get("DEBUG"): print({k: c.get(k) for k in ("phase","eve","calc","ask","bid","edge_buy","edge_sell","q_kind","spread")})
     today = now.date().isoformat()
+
+    # ---- пуш: расчётная цена пая ушла от последнего значения → попросить свежие цены банка
+    ref = state.get("ping_ref") or {}
+    if c["quote_status"] == "new" or not ok(ref.get("calc")):
+        state["ping_ref"] = {"calc": round(c["calc"], 4), "at": now.isoformat()}   # точка отсчёта — свежие цены
+    else:
+        last_chk = state.get("ping_check_at")
+        if not last_chk or (now - datetime.fromisoformat(last_chk)).total_seconds() >= (PING_EVERY_MIN - 1) * 60:
+            state["ping_check_at"] = now.isoformat()
+            mv = c["calc"] / ref["calc"] - 1
+            if abs(mv) >= PING_MOVE:
+                since = datetime.fromisoformat(ref["at"]).strftime("%d.%m %H:%M")
+                send(state, f"🔔 <b>Расчетная цена пая ушла на {fmt_pct(abs(mv))} от последнего значения! "
+                            f"Пришли свежие цены из Совкомбанка</b>\n"
+                            f"Было {rub(ref['calc'])} ({since}), сейчас {rub(c['calc'])} ({pct(mv)}).\n"
+                            f"Ответь: «купить по … продать по …»")
+                state["ping_ref"] = {"calc": round(c["calc"], 4), "at": now.isoformat()}
 
     # ---- самопроверка модели по новой стоимости пая
     ck = c.get("check")
