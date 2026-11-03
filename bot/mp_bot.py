@@ -993,6 +993,7 @@ def main():
         elif len(recent) >= 5 and mae5 > 0.006:
             send(state, f"⚠️ Точность модели снизилась: средняя ошибка за 5 дней {fmt_pct(mae5)}. Сигналам доверяй осторожнее.")
     errs = state.get("model_errs") or []
+    if os.environ.get("DEBUG"): print("model check:", ck, "errs:", errs)
     acc_note = (f"точность модели: ±{fmt_pct(sum(abs(x) for x in errs[-5:]) / len(errs[-5:]))} за {len(errs[-5:])} дн."
                 if errs else None)
 
