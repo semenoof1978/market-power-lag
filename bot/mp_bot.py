@@ -981,19 +981,22 @@ def main():
 
     # ---- самопроверка модели по новой стоимости пая
     ck = c.get("check")
-    if ck and state.get("check_date") != ck["date"]:
+    chk = state.get("model_chk") or {}                  # {дата стоимости пая: ошибка модели} — одна запись на дату
+    if ck and ck["date"] not in chk:
         err = ck["model"] - ck["fact"]
-        errs = (state.get("model_errs") or [])[-19:] + [round(err, 5)]
-        state.update(model_errs=errs, check_date=ck["date"])
-        recent = errs[-5:]
+        chk[ck["date"]] = round(err, 5)
+        for old in sorted(chk)[:-20]:
+            del chk[old]
+        state["model_chk"] = chk
+        recent = [chk[d] for d in sorted(chk)[-5:]]
         mae5 = sum(abs(x) for x in recent) / len(recent)
         if abs(err) > 0.01:
             send(state, f"⚠️ Модель ошиблась на {fmt_pct(abs(err))} за {ru_date(ck['date'])}: прогноз {pct(ck['model'])}, "
                         f"факт {pct(ck['fact'])}. Если повторится, значит УК поменяла состав фонда — сигналам доверяй осторожнее.")
         elif len(recent) >= 5 and mae5 > 0.006:
             send(state, f"⚠️ Точность модели снизилась: средняя ошибка за 5 дней {fmt_pct(mae5)}. Сигналам доверяй осторожнее.")
-    errs = state.get("model_errs") or []
-    if os.environ.get("DEBUG"): print("model check:", ck, "errs:", errs)
+    errs = [chk[d] for d in sorted(chk)]
+    if os.environ.get("DEBUG"): print("model check:", ck, "errs:", chk)
     acc_note = (f"точность модели: ±{fmt_pct(sum(abs(x) for x in errs[-5:]) / len(errs[-5:]))} за {len(errs[-5:])} дн."
                 if errs else None)
 
