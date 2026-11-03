@@ -972,10 +972,17 @@ def main():
                     fire = True                   # ушло в другую сторону за порог — это новое событие
             if fire:
                 since = datetime.fromisoformat(ref["at"]).strftime("%d.%m %H:%M")
+                reserve = ""
+                if c.get("quote") and c.get("q_kind") == "user":      # запас до сигнала по последним ценам банка
+                    e, what = (c["edge_buy"], "покупка") if mv > 0 else (c["edge_sell"], "выход")
+                    left = THRESHOLD - e
+                    reserve = (f"По твоим ценам {what} сейчас {pct(e)}, "
+                               + (f"до сигнала ещё {fmt_pct(left)}.\n" if left > 0 else "порог сигнала уже пройден.\n"))
                 again = "ещё дальше: " if al and d == al["dir"] else ""
                 send(state, f"🔔 <b>Расчетная цена пая ушла на {fmt_pct(abs(mv))} от последнего значения! "
                             f"Пришли свежие цены из Совкомбанка</b>\n"
                             f"Было {rub(ref['calc'])} ({since}), сейчас {rub(c['calc'])} ({again}{pct(mv)}).\n"
+                            f"{reserve}"
                             f"Ответь: «купить по … продать по …»")
                 state["ping_alert"] = {"dir": d, "mv": round(mv, 5)}
 
