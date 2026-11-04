@@ -1,0 +1,23 @@
+name: OCR test
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --quiet pillow
+      - name: Test OCR on synthetic image
+        run: |
+          python3 - <<'PY'
+          import sys
+          from PIL import Image, ImageDraw, ImageFont
+          f = ImageFont.truetype("bot/fonts/DejaVuSans-Bold.ttf", 40)
+          im = Image.new("RGB", (864, 400), (20, 20, 20)); d = ImageDraw.Draw(im)
+          d.text((30, 30), "RU000A107G30", font=f, fill="white")
+          d.text((30, 130), "Купить по   151,2 ₽", font=f, fill="white")
+          d.text((30, 200), "Продать по   148,2 ₽", font=f, fill="white")
+          im.save("t.png")
+          sys.path.insert(0, "bot")
+          import mp_bot as B
+          print("RESULT:", B.quotes_from_image(open("t.png", "rb").read()))
+          PY

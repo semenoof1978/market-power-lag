@@ -14,7 +14,10 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -737,6 +740,7 @@ PRICE_RE = r"(\d{2,4}(?:[.,]\d{1,2})?)"
 HELP_TEXT = ("📖 Команды (ответ — при ближайшей проверке, до 10 минут):\n"
              "• «статус» или «обнови» — карточка с текущим расчётом\n"
              "• «купить по 154,83 продать по 151,78» — цены пая из приложения, расчёт станет точным\n"
+             "• 📷 скриншот страницы пая из приложения Совкомбанка — бот сам прочитает «Купить по» и «Продать по»\n"
              "• «сброс» — снова оценивать цены самому\n"
              "• «купил 100 по 154,83» / «продал 100 по 151,78» — записать сделку; без цены — по текущей\n"
              "• «сделки» — открытые круги и итог\n"
@@ -752,9 +756,80 @@ HELP_TEXT = ("📖 Команды (ответ — при ближайшей пр
              "Цены «купить по … продать по …» присылай после 19:00 — тогда расчёт точный.")
 
 
+# ---------------------------------------------------------------- цены со скриншота
+def ensure_tesseract():
+    if shutil.which("tesseract"):
+        return True
+    try:  # на GitHub-раннере ставим распознавание только когда пришёл скриншот
+        subprocess.run(["sudo", "apt-get", "install", "-y", "-qq", "tesseract-ocr", "tesseract-ocr-rus", "tesseract-ocr-eng"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=240, check=False)
+    except Exception as e:  # noqa: BLE001
+        print("tesseract install failed:", e)
+    return bool(shutil.which("tesseract"))
+
+
+def parse_quotes_text(txt):
+    """Из распознанного текста экрана пая достаёт «Купить по» и «Продать по»."""
+    txt = txt.lower().replace("\n", " ")
+    out = []
+    for pat in (r"(?:куп\w*|buy)\s*по\s*[:\-]?\s*" + PRICE_RE, r"(?:прод\w*|sell)\s*по\s*[:\-]?\s*" + PRICE_RE):
+        m_ = re.search(pat, txt)
+        v = num(m_.group(1)) if m_ else None
+        out.append(v if v and 20 < v < 2000 else None)
+    return out[0], out[1]
+
+
+def quotes_from_image(png):
+    """(buy, sell, пояснение) из скриншота приложения Совкомбанка."""
+    if not ensure_tesseract():
+        return None, None, "не смог включить распознавание на сервере — пришли цены текстом"
+    variants = [None, "invert"]
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "in.png")
+        with open(src, "wb") as f:
+            f.write(png)
+        for v in variants:
+            path = src
+            if v:
+                try:
+                    from PIL import Image, ImageOps
+                    im = ImageOps.invert(Image.open(src).convert("L"))
+                    im = im.resize((im.width * 2, im.height * 2))
+                    path = os.path.join(td, "inv.png")
+                    im.save(path)
+                except Exception:  # noqa: BLE001
+                    continue
+            for psm in ("6", "11"):
+                try:
+                    r = subprocess.run(["tesseract", path, "-", "-l", "rus+eng", "--psm", psm],
+                                       capture_output=True, text=True, timeout=90)
+                except Exception as e:  # noqa: BLE001
+                    print("tesseract failed:", e)
+                    continue
+                b, sl = parse_quotes_text(r.stdout)
+                if b and sl and "107g30" not in re.sub(r"[\s\-]", "", r.stdout.lower()):
+                    return None, None, "это не экран пая Маркет Пауэр (нет кода RU000A107G30) — пришли скриншот страницы пая или цены текстом"
+                if b and sl:
+                    if b < sl or (b - sl) / ((b + sl) / 2) > 0.06:
+                        return None, None, f"распознал странные цифры ({str(b).replace('.', ',')} / {str(sl).replace('.', ',')}) — пришли цены текстом"
+                    return b, sl, f"📷 Распознал со скриншота: купить по {str(b).replace('.', ',')}, продать по {str(sl).replace('.', ',')}"
+    return None, None, "не нашёл на скриншоте «Купить по» и «Продать по» — пришли цены текстом"
+
+
+def quotes_from_photo(file_id):
+    try:
+        fp = tg("getFile", file_id=file_id)["result"]["file_path"]
+        with urllib.request.urlopen(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", timeout=30) as r:
+            png = r.read()
+    except Exception as e:  # noqa: BLE001
+        print("photo download failed:", type(e).__name__)
+        return None, None, "не смог скачать картинку — пришли цены текстом"
+    return quotes_from_image(png)
+
+
 def incoming(state):
     """chat_id из первого сообщения, «статус», «купить по 154,83», «продать по 153,29», «сброс»."""
-    res = {"asked": False, "buy": None, "sell": None, "quote_off": False, "trades": [], "help": False, "list": False}
+    res = {"asked": False, "buy": None, "sell": None, "quote_off": False, "trades": [], "help": False, "list": False, "notes": []}
     try:
         upd = tg("getUpdates", offset=state.get("tg_offset", 0), timeout=0)
     except Exception as e:  # noqa: BLE001
@@ -771,7 +846,14 @@ def incoming(state):
             state["welcome"] = True
         if chat != state.get("chat_id"):
             continue
-        text = (m.get("text") or "").lower().strip()
+        text = (m.get("text") or m.get("caption") or "").lower().strip()
+        img = (m.get("photo") or [{}])[-1].get("file_id") or (
+            (m.get("document") or {}).get("file_id") if str((m.get("document") or {}).get("mime_type", "")).startswith("image/") else None)
+        if img:
+            pb, ps, note = quotes_from_photo(img)
+            res["notes"].append(note)
+            if pb and ps:
+                res["buy"], res["sell"], res["quote_off"] = pb, ps, False
         if re.search(r"статус|status|сейчас|обнов|/start|update|refresh|\bnow\b", text):
             res["asked"] = True
         if re.search(r"помощь|help|команды|commands|/help", text):
@@ -828,6 +910,8 @@ def main():
         print("Боту ещё никто не написал. Открой бота в Telegram и нажми Start.")
         save_state(state)
         return 0
+    for note in inc["notes"]:
+        send(state, note[0].upper() + note[1:] if not note.startswith("📷") else note)
     if state.pop("welcome", False):
         send(state, "👋 Бот «Лаг Маркет Пауэр» подключён.\n"
                     f"Проверяю каждые 10 минут с 7 до 1 МСК, сигнал при выгоде от {str(THRESHOLD * 100).replace('.', ',')}% после спреда, "
