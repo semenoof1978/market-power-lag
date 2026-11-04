@@ -622,7 +622,7 @@ def msg_signal(c, now):
 
 def msg_summary(c, now):
     state = {"buy": "🟩 ПОКУПАТЬ", "sell": "🟥 ПРОДАВАТЬ", "none": "⬜ ДЕРЖАТЬ"}[c["signal"]]
-    tip = "" if c["q_kind"] in ("user", "exchange") else "\n\nДля точного расчёта пришли цены из приложения: «купить по 154,83» и «продать по 153,29»"
+    tip = "" if c["q_kind"] in ("user", "exchange") else "\n\nДля точного расчёта пришли скриншот страницы пая из приложения (или текстом: «купить по 154,83 продать по 153,29»)"
     return (f"📋 Сводка {now.strftime('%d.%m %H:%M')} · {state} · {thr_txt()}\n\n"
             f"{msg_body(c, now)}\n\nСостав фонда: {c['w_src']}, на {c['w_date']}.{c.get('fund_note', '')}{tip}")
 
@@ -1067,7 +1067,7 @@ def main():
                             f"Пришли свежие цены из Совкомбанка</b>\n"
                             f"Было {rub(ref['calc'])} ({since}), сейчас {rub(c['calc'])} ({again}{pct(mv)}).\n"
                             f"{reserve}"
-                            f"Ответь: «купить по … продать по …»")
+                            f"Пришли скриншот страницы пая")
                 state["ping_alert"] = {"dir": d, "mv": round(mv, 5)}
 
     # ---- самопроверка модели по новой стоимости пая
@@ -1153,8 +1153,8 @@ def main():
     # ---- напоминание прислать цены: вечером, если рынок заметно сдвинулся после 19:00
     if c["phase"] == "evening" and c.get("eve") is not None and abs(c["eve"]) >= 0.01 \
             and state.get("remind_date") != today and c["q_kind"] != "user":
-        send(state, f"🌙 Акции фонда на вечерней сессии {pct(c['eve'])}. Пришли цены пая из приложения "
-                    "(«купить по … продать по …») — посчитаю выгоду точно.")
+        send(state, f"🌙 Акции фонда на вечерней сессии {pct(c['eve'])}. Пришли скриншот страницы пая "
+                    "из приложения — посчитаю выгоду точно.")
         state["remind_date"] = today
 
     # ---- сигнал
