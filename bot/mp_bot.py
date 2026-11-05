@@ -438,6 +438,30 @@ def fund_move(weights, ret_of, r_idx):
     return move, missing
 
 
+def spread_slot(now):
+    """Окно суток, в котором спред банка отличается: утро (до 10:00), день, вечер (после 19:00)."""
+    m = now.hour * 60 + now.minute
+    return "morning" if m < 10 * 60 else "evening" if m >= MAIN_CLOSE else "day"
+
+
+def spread_for(state, now):
+    """Спред для оценки, когда цен от тебя нет: медиана последних спредов в это же окно суток,
+    иначе последний присланный, иначе SPREAD."""
+    vals = sorted((state.get("spread_slots") or {}).get(spread_slot(now)) or [])
+    if vals:
+        return vals[len(vals) // 2]
+    return state.get("last_spread") or SPREAD
+
+
+def remember_spread(state, now, spr):
+    if not (0.001 <= spr <= 0.05):
+        return
+    sl = state.setdefault("spread_slots", {}).setdefault(spread_slot(now), [])
+    sl.append(round(spr, 5))
+    del sl[:-5]
+    state["last_spread"] = round(spr, 5)
+
+
 def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
     """quote — цены от пользователя: сохранённые {"buy","sell","nav","date","spread"}
     или только что присланные {"new": True, "buy", "sell", "prev"}; None — оценивать самому.
@@ -990,7 +1014,7 @@ def run_once():
         except Exception as e:  # noqa: BLE001
             print("dividends failed:", e)
             divs = {}
-        c = calculate(now, quote, tuple(fund), exq, state.get("last_spread") or SPREAD, divs)
+        c = calculate(now, quote, tuple(fund), exq, spread_for(state, now), divs)
         c["fund_note"] = fund_note
     except SourceError as e:
         fails = state.get("fails", 0) + 1
@@ -1033,7 +1057,7 @@ def run_once():
     if c["quote_status"] == "new":
         state["quote"] = c["quote"]
         if c["quote"].get("buy") and c["quote"].get("sell"):
-            state["last_spread"] = round(c["quote"]["spread"], 5)   # запоминаем реальный спред Совкомбанка
+            remember_spread(state, now, c["quote"]["spread"])   # запоминаем реальный спред Совкомбанка по окну суток
         qq = c["quote"]
         parts = [f"купить по {rub(qq['buy'])}" if qq.get("buy") else None,
                  f"продать по {rub(qq['sell'])}" if qq.get("sell") else None]
