@@ -50,8 +50,12 @@ PING_MOVE = env_float("PING_MOVE", 1.5) / 100   # пуш «пришли свеж
 PING_STEP = env_float("PING_STEP", 0.5) / 100    # повторный пуш — только если цена ушла ещё на столько дальше
 PING_EVERY_MIN = 10                              # проверяем при каждом запуске (cron — каждые 10 минут, т.е. не реже 15)
 REPEAT_HOURS = 3        # повтор действующего сигнала не чаще
-FAILS_TO_ALERT = 3      # подряд неудачных проверок (по 10 минут) до оповещения о связи
-REMIND_EVERY = 18       # напоминание «связи всё ещё нет» — раз в 3 часа
+FAIL_ALERT_MIN = 30     # сколько минут подряд нет данных до оповещения о связи
+REMIND_HOURS = 3        # напоминание «связи всё ещё нет» — раз в 3 часа
+LOOP_EVERY = env_float("LOOP_EVERY_SEC", 150)   # вечером бот проверяет внутри одного запуска каждые N секунд
+LOOP_MAX = env_float("LOOP_MAX_SEC", 480)       # …но не дольше N секунд (дальше cron запустит новый)
+LOOP_MARGIN = 40        # запас на длительность самой проверки, сек
+DEBOUNCE_MIN = 8        # новый сигнал во время торгов — только если держится столько минут
 
 DEF_WEIGHTS = [("LKOH", "Лукойл", 9.71), ("SVCB", "Совкомбанк", 8.49), ("SBER", "Сбербанк", 8.43),
                ("DOMRF", "ДОМ.РФ", 8.30), ("T", "Т-Технологии", 7.95), ("TATNP", "Татнефть-п", 6.66),
@@ -737,7 +741,7 @@ def send_signal(state, c, now, text=None, notes=None, **card):
 
 PRICE_RE = r"(\d{2,4}(?:[.,]\d{1,2})?)"
 
-HELP_TEXT = ("📖 Команды (ответ — при ближайшей проверке, до 10 минут):\n"
+HELP_TEXT = ("📖 Команды (ответ — при ближайшей проверке: до 10 минут, вечером после 19:00 — 2–3 минуты):\n"
              "• «статус» или «обнови» — карточка с текущим расчётом\n"
              "• «купить по 154,83 продать по 151,78» — цены пая из приложения, расчёт станет точным\n"
              "• 📷 скриншот страницы пая из приложения Совкомбанка — бот сам прочитает «Купить по» и «Продать по»\n"
@@ -894,7 +898,7 @@ def save_state(s):
 
 
 # ---------------------------------------------------------------- main
-def main():
+def run_once():
     now = datetime.now(MSK)
     if not TOKEN:
         print("Нет секрета TELEGRAM_TOKEN — добавь его в Settings → Secrets → Actions. Пропускаю запуск.")
@@ -992,29 +996,38 @@ def main():
         fails = state.get("fails", 0) + 1
         state["fails"] = fails
         state["last_error"] = str(e)
+        state.setdefault("fails_since", now.isoformat())
+        down_min = (now - datetime.fromisoformat(state["fails_since"])).total_seconds() / 60
         print("ERROR:", e)
-        if fails == FAILS_TO_ALERT or MODE == "summary" or asked or got_prices:
+        if (not state.get("alerted") and down_min >= FAIL_ALERT_MIN) or MODE == "summary" or asked or got_prices:
             send(state, f"⚠️ <b>Нет связи</b>: {e.source} — {e.detail}.\n"
                         f"Неудачных проверок подряд: {fails}. Сигналы не приходят, пока связь не вернётся. "
                         f"Сообщу, когда восстановится.")
             state["alerted"] = True
-        elif fails > FAILS_TO_ALERT and fails % REMIND_EVERY == 0:
-            send(state, f"⚠️ Связи всё ещё нет: {e.source} — {e.detail}. Проверок без данных подряд: {fails}.")
+            state["remind_fail_at"] = now.isoformat()
+        elif state.get("alerted") and (now - datetime.fromisoformat(state.get("remind_fail_at") or now.isoformat())
+                                       ).total_seconds() >= REMIND_HOURS * 3600:
+            send(state, f"⚠️ Связи всё ещё нет: {e.source} — {e.detail}. Уже {int(down_min // 60)} ч {int(down_min % 60)} мин.")
+            state["remind_fail_at"] = now.isoformat()
         if got_prices:
             state["quote"] = {"new": True, "buy": inc["buy"], "sell": inc["sell"]}
         save_state(state)
         return 0
     except Exception as e:  # noqa: BLE001
         state["fails"] = state.get("fails", 0) + 1
+        state.setdefault("fails_since", now.isoformat())
         print("UNEXPECTED:", repr(e))
-        if state["fails"] == FAILS_TO_ALERT:
+        if not state.get("alerted_unexp") and \
+                (now - datetime.fromisoformat(state["fails_since"])).total_seconds() >= FAIL_ALERT_MIN * 60:
+            state["alerted_unexp"] = True
             send(state, f"⚠️ Бот не смог посчитать стоимость пая: {type(e).__name__}. Нужна проверка кода.")
         save_state(state)
         raise
 
     if state.get("alerted"):
         send(state, f"✅ Связь восстановлена после {state.get('fails', 0)} неудачных проверок.")
-    state.update(fails=0, alerted=False, last_error=None)
+    state.update(fails=0, alerted=False, alerted_unexp=False, last_error=None)
+    state.pop("fails_since", None)
 
     # ---- котировка пользователя
     if c["quote_status"] == "new":
@@ -1163,9 +1176,11 @@ def main():
     signal_sent = False
     # антидребезг: во время торгов новый сигнал — только если держится 2 проверки подряд
     pend = state.get("pending") or {}
-    pend = {"signal": c["signal"], "n": pend.get("n", 0) + 1 if pend.get("signal") == c["signal"] else 1}
+    since = pend.get("since") if pend.get("signal") == c["signal"] and pend.get("since") else now.isoformat()
+    pend = {"signal": c["signal"], "since": since}
     state["pending"] = pend
-    steady = (not in_session(now)) or pend["n"] >= 2 or asked
+    held_min = (now - datetime.fromisoformat(since)).total_seconds() / 60
+    steady = (not in_session(now)) or held_min >= DEBOUNCE_MIN or asked
     if c["signal"] != "none" and steady and (c["signal"] != last or hours >= REPEAT_HOURS or asked):
         send_signal(state, c, now)
         state["signal_at"] = now.isoformat()
@@ -1185,6 +1200,18 @@ def main():
     state["close_cache"] = dict(CLOSE_CACHE)
     save_state(state)
     return 0
+
+
+def main():
+    """Один запуск Actions = одна проверка; а вечером (19:00–00:05) — серия проверок каждые LOOP_EVERY секунд,
+    пока не истекут LOOP_MAX секунд: команды и скриншоты обрабатываются за 2–3 минуты."""
+    t0 = time.time()
+    while True:
+        rc = run_once()
+        now = datetime.now(MSK)
+        if MODE != "auto" or not in_session(now) or time.time() - t0 + LOOP_EVERY + LOOP_MARGIN > LOOP_MAX:
+            return rc
+        time.sleep(LOOP_EVERY)
 
 
 if __name__ == "__main__":
