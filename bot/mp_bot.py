@@ -453,6 +453,65 @@ def parse_ru_date(txt):
     return date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else None
 
 
+# ---------------------------------------------------------------- журнал сигналов («что было бы»)
+def journal_add(state, c, now):
+    """Записать сигнал (первый на каждую пару «дата стоимости пая + сторона»)."""
+    j = state.setdefault("journal", [])
+    side = c["signal"]
+    if any(e["d"] == c["expected"] and e["side"] == side for e in j):
+        return
+    j.append({"d": c["expected"], "side": side, "at": now.isoformat(), "calc": round(c["calc"], 4),
+              "ask": round(c["ask"], 4), "bid": round(c["bid"], 4), "spread": round(c["spread"], 5),
+              "kind": c["q_kind"], "edge": round(c["edge_buy"] if side == "buy" else c["edge_sell"], 5), "res": None})
+    del j[:-100]
+
+
+def journal_resolve(state, navs, now):
+    """Когда УК опубликовала стоимость пая за дату сигнала — считаем итог: купил по ask → продал по NAV·(1−s), и зеркально."""
+    nav = {d: v for d, v in navs}
+    for e in state.get("journal") or []:
+        if e["res"] is not None:
+            continue
+        if e["d"] in nav:
+            n, sp = nav[e["d"]], e["spread"]
+            e["res"] = round(n * (1 - sp) / e["ask"] - 1 if e["side"] == "buy" else e["bid"] / (n * (1 + sp)) - 1, 5)
+            e["nav"] = round(n, 4)
+        elif (now.date() - datetime.fromisoformat(e["at"]).date()).days > 10:
+            e["res"] = "expired"
+
+
+def journal_stats(state):
+    j = state.get("journal") or []
+    done = [e["res"] for e in j if isinstance(e["res"], float)]
+    opened = sum(1 for e in j if e["res"] is None)
+    return len(done), sum(1 for x in done if x > 0), (sum(done) / len(done) if done else 0.0), sum(done), opened
+
+
+def journal_note(state):
+    n, wins, avg, tot, opened = journal_stats(state)
+    if not n and not opened:
+        return None
+    if not n:
+        return f"журнал сигналов: закрытых пока нет, ждут стоимости пая: {opened}"
+    return (f"журнал сигналов: закрыто {n}, в плюс {wins}, средний итог {pct(avg)}, сумма {pct(tot)}"
+            + (f", ждут стоимости пая: {opened}" if opened else ""))
+
+
+def journal_text(state):
+    j = (state.get("journal") or [])[-10:]
+    if not j:
+        return "📒 Журнал сигналов пуст: ни одного сигнала ПОКУПАТЬ/ПРОДАВАТЬ ещё не было."
+    lines = []
+    for e in j:
+        word = "ПОКУПАТЬ" if e["side"] == "buy" else "ПРОДАВАТЬ"
+        px = e["ask"] if e["side"] == "buy" else e["bid"]
+        res = (pct(e["res"]) if isinstance(e["res"], float) else "ждём стоимость пая" if e["res"] is None else "не дождались")
+        kind = "" if e["kind"] == "user" else " (по оценке)"
+        lines.append(f"• {datetime.fromisoformat(e['at']).strftime('%d.%m %H:%M')} {word} по {rub(px)}{kind} → {res}")
+    note = journal_note(state)
+    return "📒 Журнал сигналов (последние 10):\n" + "\n".join(lines) + (f"\n\n{note}" if note else "")
+
+
 def spread_slot(now):
     """Окно суток, в котором спред банка отличается: утро (до 10:00), день, вечер (после 19:00)."""
     m = now.hour * 60 + now.minute
@@ -787,6 +846,7 @@ HELP_TEXT = ("📖 Команды (ответ — при ближайшей пр
              "• «сброс» — снова оценивать цены самому\n"
              "• «купил 100 по 154,83» / «продал 100 по 151,78» — записать сделку; без цены — по текущей\n"
              "• «сделки» — открытые круги и итог\n"
+             "• «журнал» — последние сигналы и чем они закончились\n"
              "• «помощь» — этот список\n\n"
              "🔔 Каждые 15 минут бот сверяет расчётную цену пая с последним значением (после твоих цен или прошлого "
              "напоминания). Если она ушла на 1,5% и больше — пришлёт напоминание прислать свежие цены.\n\n"
@@ -872,7 +932,7 @@ def quotes_from_photo(file_id):
 
 def incoming(state):
     """chat_id из первого сообщения, «статус», «купить по 154,83», «продать по 153,29», «сброс»."""
-    res = {"asked": False, "buy": None, "sell": None, "quote_off": False, "trades": [], "help": False, "list": False, "notes": []}
+    res = {"asked": False, "buy": None, "sell": None, "quote_off": False, "trades": [], "help": False, "list": False, "journal": False, "notes": []}
     try:
         upd = tg("getUpdates", offset=state.get("tg_offset", 0), timeout=0)
     except Exception as e:  # noqa: BLE001
@@ -903,6 +963,8 @@ def incoming(state):
             res["help"] = True
         if re.search(r"^/?(сделки|trades)\b", text):
             res["list"] = True
+        if re.search(r"^/?(журнал|journal)\b", text):
+            res["journal"] = True
         for m3 in re.finditer(r"(купил|докупил|продал|bought|sold)\s+(\d{1,6})(?:\s*(?:шт\.?|па[её]в|пая|пай|units?|pcs))?"
                               r"(?:\s*(?:по|за|at|@|for)\s*" + PRICE_RE + ")?", text):
             px_ = num(m3.group(3)) if m3.group(3) else None
@@ -1186,6 +1248,9 @@ def run_once():
             nxt = "продать" if side == "buy" else "откупить"
             lines.append(f"📝 Записал: {act} {remaining} шт. по {rub(price)}. Напомню {nxt}, когда Совкомбанк обновит цену.")
         send(state, "\n".join(lines))
+    journal_resolve(state, fund[0], now)
+    if inc["journal"]:
+        send(state, journal_text(state))
     if inc["list"]:
         if rounds:
             body = "\n".join(f"• {'купил' if r['side'] == 'long' else 'продал'} {r['qty']} шт. по {rub(r['price'])} "
@@ -1234,6 +1299,7 @@ def run_once():
         send_signal(state, c, now)
         state["signal_at"] = now.isoformat()
         signal_sent = True
+        journal_add(state, c, now)
     elif c["signal"] == "none" and last != "none":
         send_signal(state, c, now, f"⬜ <b>ДЕРЖАТЬ</b>: сигнал «{'Покупать' if last == 'buy' else 'Продавать'}» больше не действует · {thr_txt()}.\n\n{msg_body(c, now)}")
     if c["signal"] == "none" or steady:
@@ -1242,7 +1308,7 @@ def run_once():
     # ---- сводка
     due = now.hour >= SUMMARY_HOUR and state.get("summary_date") != today
     if (MODE == "summary" or asked or due) and not (signal_sent and not due):
-        send_signal(state, c, now, msg_summary(c, now), notes=[acc_note] if acc_note else None)
+        send_signal(state, c, now, msg_summary(c, now), notes=[x for x in (acc_note, journal_note(state)) if x] or None)
     if due:
         state["summary_date"] = today
 
