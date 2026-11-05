@@ -55,6 +55,8 @@ REMIND_HOURS = 3        # напоминание «связи всё ещё не
 LOOP_EVERY = env_float("LOOP_EVERY_SEC", 150)   # вечером бот проверяет внутри одного запуска каждые N секунд
 LOOP_MAX = env_float("LOOP_MAX_SEC", 480)       # …но не дольше N секунд (дальше cron запустит новый)
 LOOP_MARGIN = 40        # запас на длительность самой проверки, сек
+WEIGHTS_STALE_DAYS = 45  # состав фонда старше этого — напомнить
+WEIGHTS_WARN_EVERY = 30  # …и повторять не чаще раза в N дней (УК обновляет состав редко)
 DEBOUNCE_MIN = 8        # новый сигнал во время торгов — только если держится столько минут
 
 DEF_WEIGHTS = [("LKOH", "Лукойл", 9.71), ("SVCB", "Совкомбанк", 8.49), ("SBER", "Сбербанк", 8.43),
@@ -436,6 +438,19 @@ def fund_move(weights, ret_of, r_idx):
         move += w * r
     move += max(0.0, 1 - w_sum) * r_idx
     return move, missing
+
+
+RU_MONTHS = {"января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6, "июля": 7,
+             "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12}
+
+
+def parse_ru_date(txt):
+    """«30 сентября 2026» или «30.09.2026» → date; иначе None."""
+    m = re.match(r"\s*(\d{1,2})\s+([а-яё]+)\s+(\d{4})", txt or "")
+    if m and m.group(2) in RU_MONTHS:
+        return date(int(m.group(3)), RU_MONTHS[m.group(2)], int(m.group(1)))
+    m = re.match(r"\s*(\d{2})\.(\d{2})\.(\d{4})", txt or "")
+    return date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else None
 
 
 def spread_slot(now):
@@ -1052,6 +1067,16 @@ def run_once():
         send(state, f"✅ Связь восстановлена после {state.get('fails', 0)} неудачных проверок.")
     state.update(fails=0, alerted=False, alerted_unexp=False, last_error=None)
     state.pop("fails_since", None)
+
+    # ---- состав фонда устарел: УК публикует топ-10 раз в месяц-квартал, веса в расчёте стареют
+    wd = parse_ru_date(c.get("w_date"))
+    wage = (now.date() - wd).days if wd else None
+    last_warn = date.fromisoformat(state["weights_warn"]) if state.get("weights_warn") else None
+    if wage is not None and wage > WEIGHTS_STALE_DAYS and (not last_warn or (now.date() - last_warn).days >= WEIGHTS_WARN_EVERY):
+        send(state, f"🧩 Состав фонда на сайте УК от {c['w_date']} — уже {wage} дн. Если УК выложила свежий, а бот его не видит, "
+                    f"расчёт идёт по старым весам и ошибка растёт. Загляни в раздел «Топ-10 эмитентов» на сайте УК"
+                    f"{' (бот взял сохранённый состав — страницу, возможно, поменяли)' if c['w_src'] != 'сайт УК' else ''}.")
+        state["weights_warn"] = now.date().isoformat()
 
     # ---- котировка пользователя
     if c["quote_status"] == "new":
