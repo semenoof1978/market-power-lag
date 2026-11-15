@@ -1,0 +1,30 @@
+name: Watchdog
+
+# Страховка от пропуска cron-job.org: раз в 10 минут проверяет, запускался ли бот последние 12 минут.
+# Если нет — запускает его сам. Если запуски идут нормально, ничего не делает (лишних запусков в очереди нет).
+on:
+  schedule:
+    - cron: '5,15,25,35,45,55 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Start bot if it has not run recently
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          last=$(gh api "repos/$GH_REPO/actions/workflows/bot.yml/runs?per_page=1" -q '.workflow_runs[0].created_at')
+          age=$(( $(date +%s) - $(date -d "$last" +%s) ))
+          echo "last bot run: $last (${age}s ago)"
+          if [ "$age" -gt 720 ]; then
+            echo "bot has not run for >12 min — starting it"
+            gh workflow run bot.yml -f mode=auto
+          fi
