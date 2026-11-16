@@ -513,18 +513,15 @@ def journal_text(state):
 
 
 def spread_slot(now):
-    """Окно суток, в котором спред банка отличается: утро (до 10:00), день, вечер (после 19:00)."""
-    m = now.hour * 60 + now.minute
-    return "morning" if m < 10 * 60 else "evening" if m >= MAIN_CLOSE else "day"
+    """Спред банка зависит от того, обновляет ли он цену: пока идёт сессия — «day», когда цена заморожена — «evening»."""
+    return "day" if bank_live(now) else "evening"
 
 
 def spread_for(state, now):
-    """Спред для оценки, когда цен от тебя нет: медиана последних спредов в это же окно суток,
-    иначе последний присланный, иначе SPREAD."""
+    """Спред для оценки, когда цен от тебя нет: медиана последних спредов из того же окна,
+    иначе стандартный SPREAD. Спреды другого окна (днём шире) сюда не подмешиваем."""
     vals = sorted((state.get("spread_slots") or {}).get(spread_slot(now)) or [])
-    if vals:
-        return vals[len(vals) // 2]
-    return state.get("last_spread") or SPREAD
+    return vals[len(vals) // 2] if vals else SPREAD
 
 
 def remember_spread(state, now, spr):
@@ -533,7 +530,7 @@ def remember_spread(state, now, spr):
     sl = state.setdefault("spread_slots", {}).setdefault(spread_slot(now), [])
     sl.append(round(spr, 5))
     del sl[:-5]
-    state["last_spread"] = round(spr, 5)
+    state["last_spread"] = round(spr, 5)   # только для справки
 
 
 def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
@@ -1211,7 +1208,7 @@ def run_once():
         elif len(recent) >= 5 and mae5 > 0.006:
             send(state, f"⚠️ Точность модели снизилась: средняя ошибка за 5 дней {fmt_pct(mae5)}. Сигналам доверяй осторожнее.")
     errs = [chk[d] for d in sorted(chk)]
-    if os.environ.get("DEBUG"): print("model check:", ck, "errs:", chk)
+    if os.environ.get("DEBUG"): print("model check:", ck, "errs:", chk, "spread_slots:", state.get("spread_slots"))
     acc_note = (f"точность модели: ±{fmt_pct(sum(abs(x) for x in errs[-5:]) / len(errs[-5:]))} за {len(errs[-5:])} дн."
                 if errs else None)
 
