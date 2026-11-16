@@ -126,14 +126,14 @@ def rub(x):
 
 
 MAIN_CLOSE = 19 * 60          # конец основной сессии (с 14.09.2026; раньше 18:50)
+BANK_START = 9 * 60 + 50      # с этого момента в будни банк снова обновляет цену пая
 
 
 def bank_live(now):
-    """Совкомбанк обновляет цену пая, пока идёт утренняя/основная сессия (будни 06:50–19:00, выходные 09:50–19:00).
-    После закрытия основной сессии цена замораживается до утра — в это окно и работает лаг."""
+    """Совкомбанк обновляет цену пая только в будни с 9:50 до закрытия основной сессии (19:00).
+    В остальное время (вечер, ночь, выходные) цена заморожена — в это окно и работает лаг."""
     m = now.hour * 60 + now.minute
-    start = 6 * 60 + 50 if now.weekday() < 5 else 9 * 60 + 50
-    return start <= m < MAIN_CLOSE
+    return now.weekday() < 5 and BANK_START <= m < MAIN_CLOSE
 
 
 def in_session(now):
@@ -143,20 +143,22 @@ def in_session(now):
 
 
 def last_main_close(now):
-    """Момент последнего закрытия основной сессии, после которого цена банка заморожена."""
+    """Момент последнего закрытия основной сессии (будни), после которого цена банка заморожена.
+    В выходные и в понедельник до 9:50 это пятница 19:00."""
     d = now.replace(hour=MAIN_CLOSE // 60, minute=MAIN_CLOSE % 60, second=0, microsecond=0)
-    return d if now >= d else d - timedelta(days=1)
+    if now < d or d.weekday() >= 5:
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
 
 def next_live_start(dt):
-    """Когда банк снова начнёт обновлять цену после момента dt."""
-    d = dt
-    for _ in range(4):
-        start = d.replace(hour=6 if d.weekday() < 5 else 9, minute=50, second=0, microsecond=0)
-        if start > dt:
-            return start
-        d = (d + timedelta(days=1)).replace(hour=0, minute=0)
-    return dt + timedelta(days=1)
+    """Когда банк снова начнёт обновлять цену после момента dt: ближайший будний день 9:50."""
+    d = dt.replace(hour=BANK_START // 60, minute=BANK_START % 60, second=0, microsecond=0)
+    while d <= dt or d.weekday() >= 5:
+        d = (d + timedelta(days=1)).replace(hour=BANK_START // 60, minute=BANK_START % 60)
+    return d
 
 
 def money(x):
