@@ -1146,6 +1146,11 @@ def run_once():
     # ---- котировка пользователя
     if c["quote_status"] == "new":
         state["quote"] = c["quote"]
+        qlog = state.setdefault("quote_log", [])      # история присланных цен: когда банк двигает цену относительно расчёта
+        qlog.append({"t": now.strftime("%d.%m %H:%M"), "buy": c["quote"].get("buy"), "sell": c["quote"].get("sell"),
+                     "calc": round(c["calc"], 2), "phase": c["phase"]})
+        del qlog[:-60]
+        print("QUOTE_LOG:", qlog[-1])
         if c["quote"].get("buy") and c["quote"].get("sell"):
             remember_spread(state, now, c["quote"]["spread"])   # запоминаем реальный спред Совкомбанка по окну суток
         qq = c["quote"]
