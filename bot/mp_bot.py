@@ -520,10 +520,13 @@ def spread_slot(now):
 
 
 def spread_for(state, now):
-    """Спред для оценки, когда цен от тебя нет: медиана последних спредов из того же окна,
-    иначе стандартный SPREAD. Спреды другого окна (днём шире) сюда не подмешиваем."""
-    vals = sorted((state.get("spread_slots") or {}).get(spread_slot(now)) or [])
-    return vals[len(vals) // 2] if vals else SPREAD
+    """Спред для оценки, когда цен от тебя нет: спред последних присланных цен, если им не больше суток
+    (данные 12–16.11 показали: спред меняется от дня ко дню, а не по времени суток; вечером цена банка = дневная,
+    ночью ничего не меняется). Старше суток — стандартный SPREAD."""
+    at, sp = state.get("last_spread_at"), state.get("last_spread")
+    if at and sp and (now - datetime.fromisoformat(at)).total_seconds() <= 24 * 3600:
+        return sp
+    return SPREAD
 
 
 def remember_spread(state, now, spr):
@@ -532,7 +535,8 @@ def remember_spread(state, now, spr):
     sl = state.setdefault("spread_slots", {}).setdefault(spread_slot(now), [])
     sl.append(round(spr, 5))
     del sl[:-5]
-    state["last_spread"] = round(spr, 5)   # только для справки
+    state["last_spread"] = round(spr, 5)
+    state["last_spread_at"] = now.isoformat()
 
 
 def calculate(now, quote, fund, exq=None, spread=SPREAD, divs=None):
