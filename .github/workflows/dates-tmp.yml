@@ -1,0 +1,16 @@
+name: dates-tmp
+on:
+  push:
+    paths: ['research/dates.py', '.github/workflows/dates-tmp.yml']
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -q requests pillow || true
+      - run: python3 -u research/dates.py
+        env:
+          DATES: "2025-04-09,2025-04-10,2025-04-21,2025-04-22,2025-04-28,2025-04-29,2025-05-12,2025-05-14,2025-05-15,2025-05-27,2025-06-16,2025-06-17,2025-06-18,2025-06-20,2025-06-23,2025-08-06,2025-08-07,2025-09-23,2025-09-24,2025-10-16,2025-10-17,2025-10-20,2025-10-30,2025-10-31"
