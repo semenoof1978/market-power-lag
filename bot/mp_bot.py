@@ -48,7 +48,7 @@ QUOTE_LAG = int(env_float("QUOTE_LAG_DAYS", 1)) # котировка = стои�
 SUMMARY_HOUR = int(env_float("SUMMARY_HOUR", 19))
 PING_MOVE = env_float("PING_MOVE", 1.0) / 100   # пуш «пришли свежие цены», если расчётная цена ушла на столько
 PING_STEP = env_float("PING_STEP", 0.5) / 100    # повторный пуш — только если цена ушла ещё на столько дальше
-PING_EVERY_MIN = env_float("PING_EVERY_MIN", 2)  # как часто проверяем уход цены: вечером бот проверяет каждые 2,5 мин, днём — при каждом запуске
+PING_EVERY_MIN = env_float("PING_EVERY_MIN", 2)  # как часто проверяем уход цены: вечером и утром до 10:00 бот проверяет каждые 2,5 мин, днём — при каждом запуске
 REPEAT_HOURS = 3        # повтор действующего сигнала не чаще
 FAIL_ALERT_MIN = 30     # сколько минут подряд нет данных до оповещения о связи
 REMIND_HOURS = 3        # напоминание «связи всё ещё нет» — раз в 3 часа
@@ -140,6 +140,13 @@ def in_session(now):
     """Идёт вечерняя сессия (цены ещё меняются, сигнал предварительный): будни 19:00–23:50 + 15 мин задержки данных."""
     m = now.hour * 60 + now.minute
     return now.weekday() < 5 and MAIN_CLOSE <= m < 24 * 60 + 5
+
+
+def fast_window(now):
+    """Когда бот опрашивает чаще (каждые ~2,5 мин): вечерняя сессия и утреннее окно до обновления цены банком
+    (утренняя сессия Мосбиржи с 06:50 + 15 мин задержки данных и до BANK_START) — бэктест: утро даёт столько же сигналов, сколько вечер."""
+    m = now.hour * 60 + now.minute
+    return in_session(now) or (now.weekday() < 5 and 7 * 60 + 5 <= m < BANK_START)
 
 
 def last_main_close(now):
@@ -842,7 +849,7 @@ def send_signal(state, c, now, text=None, notes=None, **card):
 
 PRICE_RE = r"(\d{2,4}(?:[.,]\d{1,2})?)"
 
-HELP_TEXT = ("📖 Команды (ответ — при ближайшей проверке: до 10 минут, вечером после 19:00 — 2–3 минуты):\n"
+HELP_TEXT = ("📖 Команды (ответ — при ближайшей проверке: до 10 минут, вечером после 19:00 и утром 07:05–10:00 — 2–3 минуты):\n"
              "• «статус» или «обнови» — карточка с текущим расчётом\n"
              "• «купить по 154,83 продать по 151,78» — цены пая из приложения, расчёт станет точным\n"
              "• 📷 скриншот страницы пая из приложения Совкомбанка — бот сам прочитает «Купить по» и «Продать по»\n"
@@ -1302,7 +1309,7 @@ def run_once():
     pend = {"signal": c["signal"], "since": since}
     state["pending"] = pend
     held_min = (now - datetime.fromisoformat(since)).total_seconds() / 60
-    steady = (not in_session(now)) or held_min >= DEBOUNCE_MIN or asked
+    steady = (not fast_window(now)) or held_min >= DEBOUNCE_MIN or asked
     if c["signal"] != "none" and steady and (c["signal"] != last or hours >= REPEAT_HOURS or asked):
         send_signal(state, c, now)
         state["signal_at"] = now.isoformat()
@@ -1332,7 +1339,7 @@ def main():
     while True:
         rc = run_once()
         now = datetime.now(MSK)
-        if MODE != "auto" or not in_session(now) or time.time() - t0 + LOOP_EVERY + LOOP_MARGIN > LOOP_MAX:
+        if MODE != "auto" or not fast_window(now) or time.time() - t0 + LOOP_EVERY + LOOP_MARGIN > LOOP_MAX:
             return rc
         time.sleep(LOOP_EVERY)
 
