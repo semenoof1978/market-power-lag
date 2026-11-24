@@ -1,0 +1,21 @@
+name: moex-diag-tmp
+on:
+  push:
+    paths: ['.github/workflows/moex-diag-tmp.yml']
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          date -u
+          for h in iss.moex.com www.moex.com smart-lab.ru contrada-capital.ru; do
+            echo "== $h"; getent hosts $h || echo "DNS FAIL"
+            curl -sS -m 15 -o /dev/null -w "http=%{http_code} ip=%{remote_ip} t=%{time_total}\n" "https://$h/" || true
+          done
+          echo "== ISS"
+          curl -sS -m 20 -w "\nhttp=%{http_code}\n" "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/SBER.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,LAST" | tail -c 400 || true
+          echo "== IPv4 only"
+          curl -4 -sS -m 20 -o /dev/null -w "http=%{http_code}\n" "https://iss.moex.com/iss/index.json" || true
+          echo "== IPv6 only"
+          curl -6 -sS -m 20 -o /dev/null -w "http=%{http_code}\n" "https://iss.moex.com/iss/index.json" || true
