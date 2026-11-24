@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import ssl
 import urllib.request
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -91,6 +92,20 @@ class SourceError(Exception):
         self.detail = detail
 
 
+_CA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "russian_trusted_root_ca.pem")
+
+
+def ssl_ctx():
+    """Мосбиржа отдаёт сертификат российского УЦ (Минцифры) — его нет в системном хранилище GitHub-раннера (с 23.11.2026
+    вечером все запросы к iss.moex.com падали с URLError). Добавляем корневой сертификат к обычным."""
+    ctx = ssl.create_default_context()
+    try:
+        ctx.load_verify_locations(_CA)
+    except Exception:  # noqa: BLE001
+        pass
+    return ctx
+
+
 def http_get(url, timeout=25, tries=3):
     last = None
     for i in range(tries):
@@ -98,7 +113,7 @@ def http_get(url, timeout=25, tries=3):
             req = urllib.request.Request(url, headers={
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
                 "Accept-Language": "ru-RU,ru;q=0.9"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx()) as r:
                 return r.read().decode("utf-8", errors="replace")
         except Exception as e:  # noqa: BLE001
             last = e
